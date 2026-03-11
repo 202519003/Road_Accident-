@@ -1,9 +1,6 @@
-streamlit==1.33.0
-pandas==2.2.1
-numpy==1.26.4
-psycopg2-binary==2.9.9
-shapely==2.0.3
-folium==0.15.1
-streamlit-folium==0.18.0
-geopy==2.4.1
-requests==2.31.0
+streamlit
+pandas
+numpy
+shapely
+folium
+streamlit-folium
