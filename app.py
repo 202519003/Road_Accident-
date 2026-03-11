@@ -32,11 +32,11 @@ This system simulates **vehicle navigation** and warns drivers when
 they approach **high accident risk zones**.
 
 Steps:
-1. Enter start location
-2. Enter destination
-3. System finds road route
-4. Car moves along road
-5. Alerts appear when approaching accident zones
+1. Enter start location  
+2. Enter destination  
+3. System finds road route  
+4. Car moves along road  
+5. Alerts appear when approaching accident zones  
 """
 )
 
@@ -44,16 +44,28 @@ Steps:
 # LOAD ACCIDENT DATA
 # ============================================================
 
-DATA_FILE = "accident_data.csv"
+DATA_FILE = "export_123.csv"
 
 try:
     accidents = pd.read_csv(DATA_FILE)
-except:
-    st.error("❌ accident_data.csv file not found.")
+except Exception as e:
+    st.error(f"CSV loading error: {e}")
     st.stop()
 
-# Convert accident locations to shapely points
+# ------------------------------------------------------------
+# CHECK REQUIRED COLUMNS
+# ------------------------------------------------------------
+
+if "latitude" not in accidents.columns or "longitude" not in accidents.columns:
+    st.error("CSV must contain 'latitude' and 'longitude' columns.")
+    st.stop()
+
+# ------------------------------------------------------------
+# CONVERT ACCIDENT POINTS
+# ------------------------------------------------------------
+
 accident_points = []
+
 for i, row in accidents.iterrows():
     accident_points.append(
         Point(row["longitude"], row["latitude"])
@@ -159,10 +171,12 @@ def check_risk(driver_point):
 
         dist = driver_point.distance(risk)
 
+        # ~50 meters
         if dist < 0.0005:
             return "ENTER"
 
-        elif dist < 0.001:
+        # ~100 meters
+        elif dist < 0.0008:
             return "APPROACH"
 
     return None
@@ -205,7 +219,7 @@ def simulate_drive(route_coords):
 
     inside_zone = False
 
-    for i, coord in enumerate(route_coords):
+    for coord in route_coords:
 
         m = create_map(coord)
 
