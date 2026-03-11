@@ -1,14 +1,12 @@
 import streamlit as st
 import pandas as pd
-import psycopg2
 import folium
 import time
 
-from shapely import wkt
 from shapely.geometry import Point
+from shapely import wkt
 from folium.plugins import HeatMap
 from streamlit_folium import st_folium
-
 
 # ---------------------------------------------------
 # PAGE CONFIG
@@ -18,49 +16,30 @@ st.set_page_config(layout="wide")
 
 st.title("🚦 Road Accident Risk Intelligence System")
 
-
-get_connection()
-
-
 # ---------------------------------------------------
-# LOAD ACCIDENT DATA
+# LOAD DATA FROM CSV
 # ---------------------------------------------------
 
-accident_query = """
-SELECT
-id,
-area,
-severity_index,
-risk_level,
-buffer_color,
-ST_AsText(geom) AS geom,
-ST_AsText(buffer_geom) AS buffer_geom
-FROM accident_data1
-WHERE risk_level='High'
-"""
+data = pd.read_csv("export_123.csv")
 
-accidents = pd.read_sql(accident_query, conn)
+# Convert WKT geometry to shapely objects
+data["geom"] = data["geom"].apply(wkt.loads)
+data["buffer_geom"] = data["buffer_geom"].apply(wkt.loads)
 
-accidents["geom"] = accidents["geom"].apply(wkt.loads)
-accidents["buffer_geom"] = accidents["buffer_geom"].apply(wkt.loads)
-
+# Filter high risk accidents
+accidents = data[data["risk_level"] == "High"]
 
 # ---------------------------------------------------
-# LOAD DRIVER PATH
+# DRIVER PATH (Example Simulation)
 # ---------------------------------------------------
 
-driver_query = """
-SELECT ST_AsText(geom) AS geom
-FROM driver_path
-LIMIT 1
-"""
-
-driver_df = pd.read_sql(driver_query, conn)
-
-driver_line = wkt.loads(driver_df.iloc[0]["geom"])
-
-driver_points = list(driver_line.coords)
-
+driver_points = [
+    (72.855, 19.140),
+    (72.856, 19.141),
+    (72.857, 19.142),
+    (72.858, 19.143),
+    (72.859, 19.144),
+]
 
 # ---------------------------------------------------
 # SESSION STATE
@@ -72,7 +51,6 @@ if "step" not in st.session_state:
 if "previous_state" not in st.session_state:
     st.session_state.previous_state = "SAFE"
 
-
 # ---------------------------------------------------
 # DRIVER CURRENT LOCATION
 # ---------------------------------------------------
@@ -80,7 +58,6 @@ if "previous_state" not in st.session_state:
 driver_location = driver_points[st.session_state.step]
 
 driver_point = Point(driver_location)
-
 
 # ---------------------------------------------------
 # ALERT ENGINE
@@ -99,9 +76,8 @@ for _, row in accidents.iterrows():
     elif buffer_polygon.distance(driver_point) < 0.004:
         current_state = "APPROACHING"
 
-
 # ---------------------------------------------------
-# ALERT MESSAGE LOGIC
+# ALERT MESSAGE
 # ---------------------------------------------------
 
 alert_message = ""
@@ -117,7 +93,6 @@ elif current_state == "SAFE" and st.session_state.previous_state == "INSIDE":
 
 st.session_state.previous_state = current_state
 
-
 # ---------------------------------------------------
 # ALERT DISPLAY
 # ---------------------------------------------------
@@ -131,21 +106,18 @@ elif "Entering" in alert_message:
 elif "Left" in alert_message:
     st.success(alert_message)
 
-
 # ---------------------------------------------------
-# MAP CENTER (AUTO)
+# MAP CENTER
 # ---------------------------------------------------
 
 center_lat = accidents["geom"].apply(lambda g: g.y).mean()
 center_lon = accidents["geom"].apply(lambda g: g.x).mean()
-
 
 # ---------------------------------------------------
 # MAP INITIALIZATION
 # ---------------------------------------------------
 
 m = folium.Map(location=[center_lat, center_lon], zoom_start=13)
-
 
 # ---------------------------------------------------
 # ACCIDENT POINTS
@@ -157,8 +129,8 @@ for _, row in accidents.iterrows():
     lon = row["geom"].x
 
     popup_text = f"""
-    <b>Accident Area:</b> {row['area']}<br>
-    <b>Severity Index:</b> {row['severity_index']}
+    Accident Area: {row['area']}
+    Severity Index: {row['severity_index']}
     """
 
     folium.CircleMarker(
@@ -168,7 +140,6 @@ for _, row in accidents.iterrows():
         fill=True,
         popup=popup_text
     ).add_to(m)
-
 
 # ---------------------------------------------------
 # BUFFER ZONES
@@ -185,30 +156,26 @@ for _, row in accidents.iterrows():
         }
     ).add_to(m)
 
-
 # ---------------------------------------------------
-# HEATMAP (OPTIONAL ANALYSIS)
+# HEATMAP
 # ---------------------------------------------------
 
 heat_data = [[row["geom"].y, row["geom"].x] for _, row in accidents.iterrows()]
 
 HeatMap(heat_data).add_to(m)
 
-
 # ---------------------------------------------------
-# DRIVER ROUTE LINE
+# DRIVER ROUTE
 # ---------------------------------------------------
 
-path_latlon = [(y, x) for x, y in driver_points]
+path_latlon = [(lat, lon) for lon, lat in driver_points]
 
 folium.PolyLine(
     path_latlon,
     color="blue",
     weight=4,
-    opacity=0.7,
-    tooltip="Driver Route"
+    opacity=0.7
 ).add_to(m)
-
 
 # ---------------------------------------------------
 # DRIVER MARKER
@@ -220,55 +187,35 @@ folium.Marker(
     popup="Driver Location"
 ).add_to(m)
 
-
 # ---------------------------------------------------
 # MAP DISPLAY
 # ---------------------------------------------------
 
 st_folium(m, width=1200, height=650)
 
-
 # ---------------------------------------------------
-# SIDEBAR DASHBOARD
+# SIDEBAR
 # ---------------------------------------------------
 
 st.sidebar.header("📊 System Dashboard")
 
-st.sidebar.metric(
-    "High Risk Locations",
-    len(accidents)
-)
-
-st.sidebar.metric(
-    "Driver Step",
-    st.session_state.step
-)
-
-st.sidebar.metric(
-    "Driver Status",
-    current_state
-)
-
+st.sidebar.metric("High Risk Locations", len(accidents))
+st.sidebar.metric("Driver Step", st.session_state.step)
+st.sidebar.metric("Driver Status", current_state)
 
 # ---------------------------------------------------
-# CONTROL PANEL
+# CONTROLS
 # ---------------------------------------------------
 
 st.subheader("🚗 Driver Simulation Controls")
 
 col1, col2, col3 = st.columns(3)
 
-
-# MOVE DRIVER
-
 if col1.button("Move Driver"):
 
     if st.session_state.step < len(driver_points) - 1:
         st.session_state.step += 1
         st.rerun()
-
-
-# AUTO DRIVE
 
 if col2.button("Auto Drive"):
 
@@ -277,14 +224,8 @@ if col2.button("Auto Drive"):
         time.sleep(1)
         st.rerun()
 
-
-# RESET SIMULATION
-
 if col3.button("Reset Simulation"):
 
     st.session_state.step = 0
     st.session_state.previous_state = "SAFE"
-
     st.rerun()
-
-
