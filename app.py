@@ -19,26 +19,7 @@ st.set_page_config(layout="wide")
 st.title("🚦 Road Accident Risk Intelligence System")
 
 
-# ---------------------------------------------------
-# DATABASE CONNECTION
-# ---------------------------------------------------
-
-@st.cache_resource
-def get_connection():
-
-    conn = psycopg2.connect(
-        host="localhost",
-        database="postgres",
-        user="postgres",
-        password="mehul123",
-        port="5432"
-    )
-
-    
-    return conn
-
-
-conn = get_connection()
+get_connection()
 
 
 # ---------------------------------------------------
@@ -305,4 +286,5 @@ if col3.button("Reset Simulation"):
     st.session_state.previous_state = "SAFE"
 
     st.rerun()
+
 
