@@ -3,7 +3,6 @@ import pandas as pd
 import folium
 import time
 
-from shapely import wkt
 from shapely.geometry import Point
 from folium.plugins import HeatMap
 from streamlit_folium import st_folium
@@ -27,9 +26,10 @@ DATA_FILE = "export_123.csv"
 
 accidents = pd.read_csv(DATA_FILE)
 
-# convert geometry text to shapely objects
-accidents["geom"] = accidents["geom"].apply(wkt.loads)
-accidents["buffer_geom"] = accidents["buffer_geom"].apply(wkt.loads)
+# create geometry from lat lon
+accidents["geom"] = accidents.apply(
+    lambda row: Point(row["longitude"], row["latitude"]), axis=1
+)
 
 # filter high risk
 accidents = accidents[accidents["risk_level"] == "High"]
@@ -257,4 +257,5 @@ if col3.button("Reset Simulation"):
     st.session_state.previous_state = "SAFE"
 
     st.rerun()
+
 
