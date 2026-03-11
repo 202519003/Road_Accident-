@@ -36,10 +36,10 @@ stop_location = st.sidebar.text_input(
 run_button = st.sidebar.button("Run")
 
 # -------------------------
-# Smooth Route
+# Smooth Path
 # -------------------------
 
-def smooth_route(df, points_between=10):
+def smooth_route(df, points_between=8):
 
     smooth = []
 
@@ -63,106 +63,113 @@ def smooth_route(df, points_between=10):
 smooth_path = smooth_route(path_data)
 
 # -------------------------
-# Default Map
+# Create Map
 # -------------------------
 
-default_map = folium.Map(
-    location=[19.07, 72.87],
-    zoom_start=11,
-    tiles="OpenStreetMap"
-)
+map_placeholder = st.empty()
+alert_placeholder = st.empty()
 
-st_folium(default_map, width=1100, height=600)
+# Default map
+m = folium.Map(location=[19.07,72.87], zoom_start=11)
 
-alert_box = st.empty()
+for _, row in risk_data.iterrows():
+
+    if row["risk_level"] == "High":
+        color = "red"
+        radius = 500
+
+    elif row["risk_level"] == "Medium":
+        color = "orange"
+        radius = 350
+
+    else:
+        color = "yellow"
+        radius = 250
+
+    folium.Circle(
+        location=[row["latitude"],row["longitude"]],
+        radius=radius,
+        color=color,
+        fill=True,
+        fill_opacity=0.4
+    ).add_to(m)
+
+map_placeholder.write(st_folium(m,width=1100,height=600))
 
 # -------------------------
-# Simulation
+# Run Simulation
 # -------------------------
 
 if run_button:
 
-    previous_zone = None
+    previous_zone=None
 
     for point in smooth_path:
 
-        car_lat, car_lon = point
+        car_lat,car_lon = point
 
-        m = folium.Map(
-            location=[car_lat, car_lon],
-            zoom_start=12
-        )
+        m = folium.Map(location=[car_lat,car_lon],zoom_start=12)
 
-        # Route line
+        # route line
         folium.PolyLine(
             smooth_path,
             color="blue",
             weight=5
         ).add_to(m)
 
-        # Risk zones
-        for _, row in risk_data.iterrows():
+        # accident zones
+        for _,row in risk_data.iterrows():
 
-            if row["risk_level"] == "High":
-                color = "red"
-                radius = 500
+            if row["risk_level"]=="High":
+                color="red"
+                radius=500
 
-            elif row["risk_level"] == "Medium":
-                color = "orange"
-                radius = 350
+            elif row["risk_level"]=="Medium":
+                color="orange"
+                radius=350
 
             else:
-                color = "yellow"
-                radius = 250
+                color="yellow"
+                radius=250
 
             folium.Circle(
-                location=[row["latitude"], row["longitude"]],
+                location=[row["latitude"],row["longitude"]],
                 radius=radius,
                 color=color,
                 fill=True,
                 fill_opacity=0.35
             ).add_to(m)
 
-        # Car marker
+        # car marker
         folium.Marker(
-            location=[car_lat, car_lon],
-            icon=folium.Icon(color="blue", icon="car")
+            [car_lat,car_lon],
+            icon=folium.Icon(color="blue",icon="car")
         ).add_to(m)
 
-        # Risk detection
-        for _, risk in risk_data.iterrows():
+        # risk alert
+        for _,risk in risk_data.iterrows():
 
-            car_point = (car_lat, car_lon)
-            risk_point = (risk["latitude"], risk["longitude"])
+            car_point=(car_lat,car_lon)
+            risk_point=(risk["latitude"],risk["longitude"])
 
-            distance = geodesic(car_point, risk_point).meters
+            distance=geodesic(car_point,risk_point).meters
 
-            if distance <= 500 and distance > 300:
+            if distance<500 and distance>300:
 
-                alert_box.warning(
+                alert_placeholder.warning(
                     f"⚠ Approaching risk zone near {risk['location']}"
                 )
 
-            elif distance <= 300:
+            elif distance<=300:
 
-                if previous_zone != risk["location"]:
+                if previous_zone!=risk["location"]:
 
-                    alert_box.error(
+                    alert_placeholder.error(
                         f"🚨 Entered {risk['risk_level']} risk zone near {risk['location']}"
                     )
 
-                    previous_zone = risk["location"]
+                    previous_zone=risk["location"]
 
-            else:
-
-                if previous_zone == risk["location"]:
-
-                    alert_box.success(
-                        f"✅ Exited risk zone near {risk['location']}"
-                    )
-
-                    previous_zone = None
-
-        st_folium(m, width=1100, height=600)
+        map_placeholder.write(st_folium(m,width=1100,height=600))
 
         time.sleep(0.25)
