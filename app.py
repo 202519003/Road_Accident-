@@ -1,268 +1,190 @@
-# ============================================================
-# ROAD ACCIDENT RISK INTELLIGENCE SYSTEM
-# Real-time navigation with accident risk alerts
-# ============================================================
-
 import streamlit as st
 import pandas as pd
-import osmnx as ox
-import networkx as nx
 import folium
 import time
-
-from shapely.geometry import Point
+import numpy as np
 from streamlit_folium import st_folium
-from geopy.geocoders import Nominatim
+from geopy.distance import geodesic
 
-
-# ============================================================
+# -------------------------------
 # PAGE CONFIG
-# ============================================================
+# -------------------------------
 
-st.set_page_config(page_title="Road Accident Risk System", layout="wide")
+st.set_page_config(layout="wide")
 
-st.title("🚦 Road Accident Risk Intelligence System")
+# -------------------------------
+# HEADER
+# -------------------------------
 
-st.write("""
-This system simulates **vehicle navigation** and warns drivers when
-they approach **high accident risk zones**.
-""")
+col1, col2 = st.columns([1,6])
+
+with col1:
+    st.image("assets/logo.png", width=80)
+
+with col2:
+    st.title("Road Accident Analysis and Alert System")
+
+# -------------------------------
+# LOAD DATA
+# -------------------------------
+
+risk_data = pd.read_csv("data/export_123.csv")
+path_data = pd.read_csv("data/driver_path_points.csv")
+
+# -------------------------------
+# SIDEBAR USER INPUT
+# -------------------------------
+
+st.sidebar.header("Route Selection")
+
+start_name = st.sidebar.text_input("Start Location")
+stop_name = st.sidebar.text_input("Stop Location")
+
+run_simulation = st.sidebar.button("Run")
+
+# -------------------------------
+# HELPER FUNCTION
+# Create smooth path
+# -------------------------------
+
+def interpolate_points(lat1, lon1, lat2, lon2, steps=20):
+
+    lat_points = np.linspace(lat1, lat2, steps)
+    lon_points = np.linspace(lon1, lon2, steps)
+
+    return list(zip(lat_points, lon_points))
 
 
-# ============================================================
-# LOAD ACCIDENT DATA
-# ============================================================
+# -------------------------------
+# CREATE SMOOTH ROUTE
+# -------------------------------
 
-DATA_FILE = "export_123.csv"
+smooth_path = []
 
-try:
-    accidents = pd.read_csv(DATA_FILE)
-except:
-    st.error("❌ CSV file not found")
-    st.stop()
+for i in range(len(path_data)-1):
 
-if "latitude" not in accidents.columns or "longitude" not in accidents.columns:
-    st.error("CSV must contain latitude and longitude columns")
-    st.stop()
+    lat1 = path_data.iloc[i]["latitude"]
+    lon1 = path_data.iloc[i]["longitude"]
 
-# convert to shapely points
-accident_points = [
-    Point(row["longitude"], row["latitude"])
-    for _, row in accidents.iterrows()
-]
+    lat2 = path_data.iloc[i+1]["latitude"]
+    lon2 = path_data.iloc[i+1]["longitude"]
 
+    segment = interpolate_points(lat1, lon1, lat2, lon2)
 
-# ============================================================
-# USER INPUT
-# ============================================================
+    smooth_path.extend(segment)
 
-st.sidebar.header("Navigation Settings")
+# -------------------------------
+# CREATE MAP
+# -------------------------------
 
-start_location = st.sidebar.text_input(
-    "Start Location (name OR lat,lon)",
-    "Andheri Mumbai"
+center_lat = path_data["latitude"].mean()
+center_lon = path_data["longitude"].mean()
+
+m = folium.Map(
+    location=[center_lat, center_lon],
+    zoom_start=13,
+    tiles="OpenStreetMap"
 )
 
-end_location = st.sidebar.text_input(
-    "Destination (name OR lat,lon)",
-    "Bandra Mumbai"
-)
+# -------------------------------
+# DRAW RISK ZONES
+# -------------------------------
 
-speed_kmh = st.sidebar.slider("Vehicle Speed", 20, 120, 60)
+for _, row in risk_data.iterrows():
 
-start_button = st.sidebar.button("Start Navigation")
+    risk_level = row["risk_level"]
 
+    if risk_level == "High":
+        color = "red"
+        radius = 500
 
-# ============================================================
-# GEOCODER
-# ============================================================
+    elif risk_level == "Medium":
+        color = "orange"
+        radius = 350
 
-geolocator = Nominatim(user_agent="risk_navigation_app")
+    else:
+        color = "yellow"
+        radius = 250
 
+    folium.Circle(
+        location=[row["latitude"], row["longitude"]],
+        radius=radius,
+        color=color,
+        fill=True,
+        fill_opacity=0.3,
+        popup=f"{row['location']} - {risk_level}"
+    ).add_to(m)
 
-# ============================================================
-# FUNCTIONS
-# ============================================================
+# -------------------------------
+# DRAW ROUTE LINE
+# -------------------------------
 
-def parse_location(place):
+folium.PolyLine(
+    smooth_path,
+    color="blue",
+    weight=4
+).add_to(m)
 
-    # allow coordinates
-    if "," in place:
-        try:
-            lat, lon = place.split(",")
-            return float(lat), float(lon)
-        except:
-            return None
+# -------------------------------
+# ALERT PLACEHOLDER
+# -------------------------------
 
-    location = geolocator.geocode(place)
+alert_box = st.empty()
 
-    if location:
-        return location.latitude, location.longitude
+# -------------------------------
+# SIMULATION
+# -------------------------------
 
-    return None
+if run_simulation:
 
+    previous_zone = None
 
-# ------------------------------------------------------------
+    for point in smooth_path:
 
-def download_roads(center):
+        car_lat, car_lon = point
 
-    graph = ox.graph_from_point(
-        center,
-        dist=8000,
-        network_type="drive"
-    )
-
-    return graph
-
-
-# ------------------------------------------------------------
-
-def calculate_route(graph, start, end):
-
-    start_node = ox.distance.nearest_nodes(graph, start[1], start[0])
-    end_node = ox.distance.nearest_nodes(graph, end[1], end[0])
-
-    route = nx.shortest_path(graph, start_node, end_node, weight="length")
-
-    coords = [(graph.nodes[n]["y"], graph.nodes[n]["x"]) for n in route]
-
-    return coords
-
-
-# ------------------------------------------------------------
-
-def check_risk(point):
-
-    for risk in accident_points:
-
-        dist = point.distance(risk)
-
-        if dist < 0.0005:
-            return "ENTER"
-
-        elif dist < 0.0009:
-            return "APPROACH"
-
-    return None
-
-
-# ------------------------------------------------------------
-
-def draw_accidents(m):
-
-    for _, row in accidents.iterrows():
-
-        folium.CircleMarker(
-            location=[row["latitude"], row["longitude"]],
-            radius=5,
-            color="red",
-            fill=True,
-            popup="Accident Risk"
-        ).add_to(m)
-
-
-# ------------------------------------------------------------
-
-def simulate_drive(route):
-
-    map_placeholder = st.empty()
-    alert_box = st.empty()
-
-    inside = False
-
-    delay = 3600 / (speed_kmh * 1000)
-
-    for coord in route:
-
-        m = folium.Map(location=coord, zoom_start=15)
-
-        # route line
-        folium.PolyLine(route, weight=6).add_to(m)
-
-        # accident points
-        draw_accidents(m)
-
-        # car marker
         folium.Marker(
-            coord,
-            tooltip="Vehicle",
-            icon=folium.Icon(color="blue", icon="car", prefix="fa")
+            location=[car_lat, car_lon],
+            icon=folium.Icon(color="blue", icon="car")
         ).add_to(m)
 
-        with map_placeholder:
-            st_folium(m, width=900, height=600)
+        # CHECK RISK ZONES
 
-        driver_point = Point(coord[1], coord[0])
+        for _, risk in risk_data.iterrows():
 
-        risk = check_risk(driver_point)
+            risk_point = (risk["latitude"], risk["longitude"])
+            car_point = (car_lat, car_lon)
 
-        if risk == "APPROACH":
-            alert_box.warning("⚠ Approaching Accident Risk Zone")
+            distance = geodesic(car_point, risk_point).meters
 
-        elif risk == "ENTER":
-            inside = True
-            alert_box.error("🚨 Entered High Risk Zone")
+            if distance < 300:
 
-        else:
-            if inside:
-                alert_box.success("✅ Exited Risk Zone")
-                inside = False
+                if previous_zone != risk["location"]:
+                    alert_box.error(
+                        f"🚨 ENTERED {risk['risk_level']} RISK ZONE near {risk['location']}"
+                    )
+
+                previous_zone = risk["location"]
+
+            elif distance < 500:
+
+                alert_box.warning(
+                    f"⚠ Approaching Risk Zone (500m) near {risk['location']}"
+                )
+
+            else:
+
+                if previous_zone == risk["location"]:
+                    alert_box.success(
+                        f"✅ Exited Risk Zone near {risk['location']}"
+                    )
+
+                    previous_zone = None
+
+        st_folium(m, width=1000, height=600)
 
         time.sleep(0.4)
 
+else:
 
-# ============================================================
-# MAIN LOGIC
-# ============================================================
-
-if start_button:
-
-    st.info("Finding locations...")
-
-    start_point = parse_location(start_location)
-    end_point = parse_location(end_location)
-
-    if start_point is None:
-        st.error("Start location not found")
-        st.stop()
-
-    if end_point is None:
-        st.error("Destination not found")
-        st.stop()
-
-    st.success("Locations found")
-
-    st.info("Downloading road network...")
-
-    G = download_roads(start_point)
-
-    st.success("Road network ready")
-
-    st.info("Calculating route...")
-
-    route_coords = calculate_route(G, start_point, end_point)
-
-    st.success("Route generated")
-
-    st.write("### 🚗 Navigation Simulation")
-
-    simulate_drive(route_coords)
-
-    st.success("Navigation Completed")
-
-
-# ============================================================
-# FOOTER
-# ============================================================
-
-st.markdown("---")
-
-st.markdown("""
-Road Accident Risk Intelligence System
-
-Features
-- Automatic route generation
-- Vehicle movement simulation
-- Accident hotspot detection
-- Driver risk alerts
-""")
+    st_folium(m, width=1000, height=600)
