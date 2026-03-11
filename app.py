@@ -10,16 +10,16 @@ st.set_page_config(layout="wide")
 
 st.title("🚦 Road Accident Analysis and Alert System")
 
-# -----------------------------
+# -------------------------
 # Load Data
-# -----------------------------
+# -------------------------
 
 risk_data = pd.read_csv("data/export_123.csv")
 path_data = pd.read_csv("data/driver_path_points.csv")
 
-# -----------------------------
-# Sidebar Inputs
-# -----------------------------
+# -------------------------
+# Sidebar
+# -------------------------
 
 st.sidebar.header("Route Selection")
 
@@ -35,11 +35,11 @@ stop_location = st.sidebar.text_input(
 
 run_button = st.sidebar.button("Run")
 
-# -----------------------------
-# Smooth Path Function
-# -----------------------------
+# -------------------------
+# Smooth Route
+# -------------------------
 
-def smooth_route(df, points_between=8):
+def smooth_route(df, points_between=10):
 
     smooth = []
 
@@ -59,29 +59,26 @@ def smooth_route(df, points_between=8):
 
     return smooth
 
+
 smooth_path = smooth_route(path_data)
 
-# -----------------------------
-# Map Placeholder
-# -----------------------------
+# -------------------------
+# Default Map
+# -------------------------
 
-map_placeholder = st.empty()
-alert_box = st.empty()
-
-# Default map when app loads
-m = folium.Map(
+default_map = folium.Map(
     location=[19.07, 72.87],
     zoom_start=11,
     tiles="OpenStreetMap"
 )
 
-map_placeholder.write(
-    st_folium(m, width=1100, height=600)
-)
+st_folium(default_map, width=1100, height=600)
 
-# -----------------------------
-# Run Simulation
-# -----------------------------
+alert_box = st.empty()
+
+# -------------------------
+# Simulation
+# -------------------------
 
 if run_button:
 
@@ -93,18 +90,17 @@ if run_button:
 
         m = folium.Map(
             location=[car_lat, car_lon],
-            zoom_start=12,
-            tiles="OpenStreetMap"
+            zoom_start=12
         )
 
-        # Draw route
+        # Route line
         folium.PolyLine(
             smooth_path,
             color="blue",
             weight=5
         ).add_to(m)
 
-        # Draw accident risk zones
+        # Risk zones
         for _, row in risk_data.iterrows():
 
             if row["risk_level"] == "High":
@@ -167,10 +163,6 @@ if run_button:
 
                     previous_zone = None
 
-        map_placeholder.write(
-            st_folium(m, width=1100, height=600)
-        )
+        st_folium(m, width=1100, height=600)
 
-        time.sleep(0.3)
-
-
+        time.sleep(0.25)
