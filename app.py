@@ -14,8 +14,8 @@ st.title("🚦 Road Accident Analysis and Alert System")
 # Load Data
 # -----------------------------
 
-risk_data = pd.read_csv("export_123.csv")
-path_data = pd.read_csv("driver_path_point.csv")
+risk_data = pd.read_csv("data/export_123.csv")
+path_data = pd.read_csv("data/driver_path_points.csv")
 
 # -----------------------------
 # Sidebar Inputs
@@ -161,3 +161,4 @@ if run_button:
         )
 
         time.sleep(0.3)
+
