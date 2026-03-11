@@ -1,115 +1,100 @@
 import streamlit as st
 import pandas as pd
+import osmnx as ox
 import folium
-from shapely.geometry import Point
-from folium.plugins import HeatMap
 from streamlit_folium import st_folium
-
-st.set_page_config(layout="wide")
+from geopy.distance import geodesic
+import time
 
 st.title("🚦 Road Accident Risk Intelligence System")
 
-# CSV FILE NAME
-DATA_FILE = "export_123.csv"
+# -----------------------------
+# LOAD ACCIDENT DATA
+# -----------------------------
 
-# LOAD DATA
+DATA_FILE = "OSM_map.csv"
+
 accidents = pd.read_csv(DATA_FILE)
 
-# CREATE GEOMETRY FROM LAT/LON
-accidents["geom"] = accidents.apply(
-    lambda row: Point(row["longitude"], row["latitude"]), axis=1
-)
+# make sure columns exist
+accidents = accidents.rename(columns={
+    "lat": "latitude",
+    "lon": "longitude"
+})
 
-# DRIVER ROUTE
-driver_points = [
-    (72.830, 21.170),
-    (72.831, 21.171),
-    (72.832, 21.172),
-    (72.833, 21.173),
-    (72.834, 21.174),
-    (72.835, 21.175),
-]
+# -----------------------------
+# USER INPUT
+# -----------------------------
 
-# SESSION STATE
-if "step" not in st.session_state:
-    st.session_state.step = 0
+start_location = st.text_input("Enter Start Location", "Varachha, Surat")
+end_location = st.text_input("Enter Destination", "Adajan, Surat")
 
-driver_location = driver_points[st.session_state.step]
-driver_point = Point(driver_location)
+run_button = st.button("Calculate Route")
 
-# ALERT ENGINE USING DISTANCE
-current_state = "SAFE"
+# -----------------------------
+# ROUTE CALCULATION
+# -----------------------------
 
-for _, row in accidents.iterrows():
-    distance = driver_point.distance(row["geom"])
+if run_button:
 
-    if distance < 0.002:
-        current_state = "INSIDE"
-        break
-    elif distance < 0.005:
-        current_state = "APPROACHING"
+    st.write("Downloading road network from OpenStreetMap...")
 
-# ALERT DISPLAY
-if current_state == "INSIDE":
-    st.error("🚨 Entered Accident Prone Area")
+    place = "Mumbai, Maharashtra, India"
 
-elif current_state == "APPROACHING":
-    st.warning("⚠️ Approaching High Risk Area")
+    G = ox.graph_from_place(place, network_type="drive")
 
-else:
-    st.success("✅ Safe Zone")
+    start = ox.geocode(start_location)
+    end = ox.geocode(end_location)
 
-# MAP CENTER
-center_lat = accidents["latitude"].mean()
-center_lon = accidents["longitude"].mean()
+    orig = ox.distance.nearest_nodes(G, start[1], start[0])
+    dest = ox.distance.nearest_nodes(G, end[1], end[0])
 
-# CREATE MAP
-m = folium.Map(location=[center_lat, center_lon], zoom_start=13)
+    route = ox.shortest_path(G, orig, dest)
 
-# ACCIDENT POINTS
-for _, row in accidents.iterrows():
+    # -----------------------------
+    # CREATE MAP
+    # -----------------------------
 
-    folium.CircleMarker(
-        location=[row["latitude"], row["longitude"]],
-        radius=6,
-        color="red",
-        fill=True,
-        popup=f"Area: {row['area']} | Severity: {row['severity_index']}"
-    ).add_to(m)
+    route_map = ox.plot_route_folium(G, route)
 
-# HEATMAP
-heat_data = accidents[["latitude", "longitude"]].values.tolist()
-HeatMap(heat_data).add_to(m)
+    # add accident markers
+    for i, row in accidents.iterrows():
 
-# DRIVER ROUTE
-path_latlon = [(y, x) for x, y in driver_points]
+        folium.CircleMarker(
+            location=[row["latitude"], row["longitude"]],
+            radius=6,
+            popup="Accident Risk Zone",
+            color="red",
+            fill=True
+        ).add_to(route_map)
 
-folium.PolyLine(
-    path_latlon,
-    color="blue",
-    weight=4,
-    opacity=0.7
-).add_to(m)
+    st.write("Route Map")
+    st_folium(route_map, width=700)
 
-# DRIVER MARKER
-folium.Marker(
-    [driver_location[1], driver_location[0]],
-    icon=folium.Icon(color="blue", icon="car"),
-    popup="Driver"
-).add_to(m)
+    # -----------------------------
+    # DRIVER SIMULATION
+    # -----------------------------
 
-# DISPLAY MAP
-st_folium(m, width=1200, height=650)
+    st.write("Driver Simulation Started")
 
-# CONTROLS
-st.subheader("Driver Simulation")
+    nodes = route
 
-if st.button("Move Driver"):
-    if st.session_state.step < len(driver_points) - 1:
-        st.session_state.step += 1
-        st.rerun()
+    for node in nodes:
 
-if st.button("Reset"):
-    st.session_state.step = 0
-    st.rerun()
+        point = (G.nodes[node]["y"], G.nodes[node]["x"])
 
+        for i, row in accidents.iterrows():
+
+            accident_point = (row["latitude"], row["longitude"])
+
+            distance = geodesic(point, accident_point).meters
+
+            if distance < 500:
+                st.warning("⚠ Approaching Risk Zone")
+
+            if distance < 100:
+                st.error("🚨 Entered Risk Zone")
+
+        time.sleep(0.5)
+
+    st.success("✅ Route Completed")
