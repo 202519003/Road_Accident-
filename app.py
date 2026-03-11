@@ -34,6 +34,7 @@ def get_connection():
         port="5432"
     )
 
+    
     return conn
 
 
@@ -304,3 +305,4 @@ if col3.button("Reset Simulation"):
     st.session_state.previous_state = "SAFE"
 
     st.rerun()
+
