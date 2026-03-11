@@ -68,6 +68,17 @@ smooth_path = smooth_route(path_data)
 map_placeholder = st.empty()
 alert_box = st.empty()
 
+# Default map when app loads
+m = folium.Map(
+    location=[19.07, 72.87],
+    zoom_start=11,
+    tiles="OpenStreetMap"
+)
+
+map_placeholder.write(
+    st_folium(m, width=1100, height=600)
+)
+
 # -----------------------------
 # Run Simulation
 # -----------------------------
@@ -161,4 +172,5 @@ if run_button:
         )
 
         time.sleep(0.3)
+
 
