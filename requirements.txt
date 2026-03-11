@@ -6,3 +6,5 @@ osmnx
 geopy
 shapely
 networkx
+scikit-learn
+scipy
