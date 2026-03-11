@@ -1,6 +1,8 @@
 streamlit
 pandas
-numpy
-shapely
 folium
 streamlit-folium
+osmnx
+geopy
+shapely
+networkx
