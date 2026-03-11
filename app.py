@@ -80,12 +80,12 @@ st.sidebar.header("Navigation Settings")
 
 start_location = st.sidebar.text_input(
     "Start Location",
-    "Dehradun"
+    "Andheri Mumbai"
 )
 
 end_location = st.sidebar.text_input(
     "Destination",
-    "ISBT Dehradun"
+    "Bandra Mumbai"
 )
 
 speed_kmh = st.sidebar.slider(
@@ -111,13 +111,21 @@ geolocator = Nominatim(user_agent="risk_navigation_app")
 
 def geocode_location(place):
 
+    # Check if user entered coordinates
+    if "," in place:
+        try:
+            lat, lon = place.split(",")
+            return (float(lat.strip()), float(lon.strip()))
+        except:
+            return None
+
+    # Otherwise treat it as place name
     location = geolocator.geocode(place)
 
     if location:
         return (location.latitude, location.longitude)
 
     return None
-
 
 # ------------------------------------------------------------
 
@@ -350,3 +358,4 @@ Features:
 Powered by OpenStreetMap + Python
 """
 )
+
