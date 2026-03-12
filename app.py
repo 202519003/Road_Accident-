@@ -533,7 +533,6 @@ def main():
             start_btn = st.button("\u25b6 Start", use_container_width=True, type="primary")
         with col2:
             stop_btn  = st.button("\u23f9 Stop",  use_container_width=True)
-        refresh_btn = st.button("\U0001f504 Run / Refresh", use_container_width=True)
 
         if st.session_state.running:
             st.success("\U0001f7e2 Car simulation active on map.")
@@ -559,9 +558,6 @@ def main():
         st.rerun()
     if stop_btn:
         st.session_state.running = False
-        st.rerun()
-    if refresh_btn:
-        st.cache_data.clear()
         st.rerun()
 
     # ── Load Data ────────────────────────────
@@ -626,9 +622,6 @@ def main():
             use_container_width=True, hide_index=True
         )
 
-    with st.expander("🛣️ Driver Path Data", expanded=False):
-        for p in driver_paths:
-            st.write(f"**Path #{p['id']}** — {len(p['coordinates'])} coordinate points | {p.get('created_at','')}")
 
     # ── Footer ────────────────────────────────
     st.markdown("""
