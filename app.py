@@ -147,8 +147,7 @@ def build_leaflet_map(accident_df: pd.DataFrame,
                        center_lat: float = 19.076,
                        center_lng: float = 72.877,
                        highlight_point=None,
-                       show_car: bool = True,
-                       car_speed: int = 60) -> str:
+                       show_car: bool = True) -> str:
 
     zones_js = json.dumps([
         {
@@ -235,7 +234,8 @@ const APPROACH_R = 500;
 const ENTER_R    = 120;
 
 // ── MAP INIT ─────────────────────────────────
-const map = L.map('map', {{zoomControl:true, preferCanvas:true}})
+// preferCanvas MUST be false — it breaks divIcon (causes ghost/duplicate car)
+const map = L.map('map', {{zoomControl:true, preferCanvas:false}})
               .setView([{center_lat}, {center_lng}], 13);
 L.tileLayer('https://{{s}}.basemaps.cartocdn.com/dark_all/{{z}}/{{x}}/{{y}}{{r}}.png', {{
   attribution:'© OpenStreetMap © CartoDB', subdomains:'abcd', maxZoom:19
@@ -299,19 +299,14 @@ const PATH_COLORS = ['#00e5ff','#69ff47','#ff4081','#e040fb','#ffab40'];
 PATHS.forEach((p,i) => {{
   if (!p.coords || p.coords.length < 2) return;
   const col = PATH_COLORS[i % PATH_COLORS.length];
-  L.polyline(p.coords, {{color:col, weight:4, opacity:0.65, dashArray:'8 5'}})
+  // Draw path line (dashed guide)
+  L.polyline(p.coords, {{color:col, weight:4, opacity:0.55, dashArray:'8 5'}})
    .bindPopup(`<b>Driver Path #${{p.id}}</b> — ${{p.coords.length}} points`)
    .addTo(pathLayer);
-  L.marker(p.coords[0], {{icon:L.divIcon({{className:'',
-    html:`<div style="background:#00c853;width:14px;height:14px;border-radius:50%;
-               border:2px solid #fff;box-shadow:0 0 8px #00c853"></div>`,
-    iconSize:[14,14],iconAnchor:[7,7]}})
-  }}).bindTooltip('🟢 Start').addTo(pathLayer);
-  L.marker(p.coords[p.coords.length-1], {{icon:L.divIcon({{className:'',
-    html:`<div style="background:#d50000;width:14px;height:14px;border-radius:50%;
-               border:2px solid #fff;box-shadow:0 0 8px #d50000"></div>`,
-    iconSize:[14,14],iconAnchor:[7,7]}})
-  }}).bindTooltip('🔴 End').addTo(pathLayer);
+  // End marker only (start is where car begins — no dot there to avoid duplicate)
+  L.circleMarker(p.coords[p.coords.length-1], {{
+    radius:7, color:'#d50000', fillColor:'#d50000', fillOpacity:1, weight:2
+  }}).bindTooltip('🔴 Destination').addTo(pathLayer);
 }});
 
 // ── SEARCHED LOCATION ────────────────────────
@@ -339,78 +334,67 @@ legend.onAdd = () => {{
     <span class="dot" style="background:#ff6d00"></span>Medium Risk<br>
     <span class="dot" style="background:#ffd600"></span>Low Risk<br>
     <span class="dot" style="background:#00e5ff"></span>Driver Path<br>
-    <span class="dot" style="background:#1e90ff"></span>🚗 Car`;
+    <span class="dot" style="background:#1e90ff"></span>🚗 Car Trail`;
   return d;
 }};
 legend.addTo(map);
 
-// ── SPEED CONTROL ─────────────────────────────
-const speedCtrl = L.control({{position:'topleft'}});
-speedCtrl.onAdd = () => {{
-  const d = L.DomUtil.create('div', '');
-  d.id = 'speedBox';
-  d.innerHTML = `<label>🚗 Animation Speed</label>
-    <input id="speedSlider" type="range" min="20" max="300" value="{car_speed}" step="10">
-    <span id="speedVal">{car_speed}ms</span>`;
-  L.DomEvent.disableClickPropagation(d);
-  return d;
-}};
-speedCtrl.addTo(map);
-document.addEventListener('input', e => {{
-  if (e.target.id==='speedSlider')
-    document.getElementById('speedVal').textContent = e.target.value + 'ms';
-}});
-
 // ── MOVING CAR SIMULATION ─────────────────────
 if (SHOW_CAR && PATHS.length > 0) {{
-  const carIcon = L.divIcon({{
-    className: '',
-    html: `<div style="font-size:24px;line-height:1;filter:drop-shadow(0 0 5px #1e90ff)">🚗</div>`,
-    iconSize:[26,26], iconAnchor:[13,13]
-  }});
 
-  const carMarker = L.marker(PATHS[0].coords[0], {{icon:carIcon, zIndexOffset:1000}}).addTo(map);
+  // Count total points across all paths to compute per-step delay for ~30s total
+  const totalPts = PATHS.reduce((s,p) => s + (p.coords ? p.coords.length : 0), 0);
+  const TARGET_MS = 30000; // 30 seconds total journey
+  const BASE_DELAY = totalPts > 0 ? Math.max(50, Math.floor(TARGET_MS / totalPts)) : 200;
+
+  // Single clean car icon — no background div, just emoji with glow
+  function makeCarIcon() {{
+    return L.divIcon({{
+      className: 'car-icon',   // must be non-empty string to avoid Leaflet adding extra class
+      html: `<span style="font-size:22px;line-height:1;display:block;
+                          filter:drop-shadow(0 0 6px #1e90ff);">🚗</span>`,
+      iconSize: [24, 24],
+      iconAnchor: [12, 12],
+      popupAnchor: [0, -14]
+    }});
+  }}
+
+  // Car marker — placed at start, NO trail yet
+  const carMarker = L.marker(PATHS[0].coords[0], {{
+    icon: makeCarIcon(),
+    zIndexOffset: 1000
+  }}).addTo(map);
+
+  // Trail line — empty at start, grows as car moves
   const trailPts  = [];
-  const trailLine = L.polyline([], {{color:'#1e90ff', weight:3, opacity:0.55}}).addTo(map);
+  const trailLine = L.polyline([], {{color:'#1e90ff', weight:3, opacity:0.7}}).addTo(map);
 
-  // Per-zone state: null | 'approaching' | 'entered'
+  // Per-zone alert state
   const zoneState = {{}};
 
   function checkZones(lat, lng) {{
     ZONES.forEach(z => {{
       const dist = haversineM(lat, lng, z.lat, z.lng);
       const prev = zoneState[z.id] || null;
-
       if (dist <= ENTER_R) {{
-        // Inside zone
         if (prev !== 'entered') {{
           zoneState[z.id] = 'entered';
-          addAlert(
-            `🚨 <b>Entered Risk Zone</b> — ${{z.area}} | ${{z.loc}} | Severity ${{z.si.toFixed(1)}}`,
-            'af-entered'
-          );
+          addAlert(`🚨 <b>Entered Risk Zone</b> — ${{z.area}} | ${{z.loc}} | Severity ${{z.si.toFixed(1)}}`, 'af-entered');
         }}
       }} else if (dist <= APPROACH_R) {{
-        // Approaching
         if (prev === 'entered') {{
-          // Was inside, now left
           zoneState[z.id] = null;
           addAlert(`✅ <b>Left Risk Zone — Safe</b> &nbsp;›&nbsp; ${{z.area}}`, 'af-left');
         }} else if (prev !== 'approaching') {{
           zoneState[z.id] = 'approaching';
-          addAlert(
-            `⚠️ <b>Approaching Risk Zone</b> — ${{z.area}} | ${{z.loc}} | ${{Math.round(dist)}}m ahead`,
-            'af-approaching'
-          );
+          addAlert(`⚠️ <b>Approaching Risk Zone</b> — ${{z.area}} | ${{z.loc}} | ${{Math.round(dist)}}m ahead`, 'af-approaching');
         }}
       }} else {{
-        // Outside both rings
         if (prev === 'entered') {{
           zoneState[z.id] = null;
           addAlert(`✅ <b>Left Risk Zone — Safe</b> &nbsp;›&nbsp; ${{z.area}}`, 'af-left');
         }} else if (prev === 'approaching') {{
           zoneState[z.id] = null;
-          // passed without entering — just clear silently
         }}
       }}
     }});
@@ -419,45 +403,49 @@ if (SHOW_CAR && PATHS.length > 0) {{
   let pathIdx = 0, ptIdx = 0;
 
   function step() {{
-    const spd = parseInt(document.getElementById('speedSlider')?.value || {car_speed});
-
     if (pathIdx >= PATHS.length) {{
+      // Simulation done
       carMarker.setIcon(L.divIcon({{
-        className:'',
-        html:`<div style="font-size:24px">🏁</div>`,
-        iconSize:[26,26], iconAnchor:[13,13]
+        className: 'car-icon',
+        html: `<span style="font-size:22px;line-height:1;display:block;">🏁</span>`,
+        iconSize:[24,24], iconAnchor:[12,12]
       }}));
       addAlert('🏁 <b>Simulation complete — Destination reached safely!</b>', 'af-safe');
       return;
     }}
 
     const coords = PATHS[pathIdx].coords;
-
     if (ptIdx >= coords.length) {{
       pathIdx++;
       ptIdx = 0;
       if (pathIdx < PATHS.length)
-        addAlert(`🟢 <b>Starting Path #${{PATHS[pathIdx].id}}</b>`, 'af-safe');
-      setTimeout(step, spd);
+        addAlert(`🟢 <b>Continuing to Path #${{PATHS[pathIdx].id}}</b>`, 'af-safe');
+      setTimeout(step, BASE_DELAY);
       return;
     }}
 
     const [lat, lng] = coords[ptIdx];
+
+    // Move car
     carMarker.setLatLng([lat, lng]);
+
+    // Grow trail — only from this point onward
     trailPts.push([lat, lng]);
     trailLine.setLatLngs(trailPts);
 
-    // Pan map to follow car smoothly
+    // Pan map gently to follow car
     if (!map.getBounds().contains([lat, lng]))
-      map.panTo([lat, lng], {{animate:true, duration:0.4}});
+      map.panTo([lat, lng], {{animate:true, duration:0.5, easeLinearity:0.5}});
 
     checkZones(lat, lng);
     ptIdx++;
-    setTimeout(step, spd);
+    setTimeout(step, BASE_DELAY);
   }}
 
-  addAlert(`🟢 <b>Starting simulation on Path #${{PATHS[0].id}}</b>`, 'af-safe');
-  step();
+  // Zoom to start of path before beginning
+  map.setView(PATHS[0].coords[0], 14);
+  addAlert(`🟢 <b>Simulation started — Path #${{PATHS[0].id}} | ${{totalPts}} steps | ~30s journey</b>`, 'af-safe');
+  setTimeout(step, 500); // small delay so map settles before car moves
 }}
 </script>
 </body>
@@ -491,7 +479,9 @@ def main():
             start_btn = st.button("▶ Start", use_container_width=True, type="primary")
         with col2:
             stop_btn  = st.button("⏹ Stop",  use_container_width=True)
-        st.button("🔄 Run / Refresh", use_container_width=True)
+        if st.button("🔄 Run / Refresh", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
 
         if "running" not in st.session_state:
             st.session_state.running = False
@@ -513,8 +503,6 @@ def main():
         st.subheader("🔧 Filters & Settings")
         risk_filter = st.multiselect("Risk Level", ["High", "Medium", "Low"], default=["High", "Medium", "Low"])
         radius_m    = st.slider("Search Alert Radius (m)", 100, 2000, 500, step=100)
-        car_speed   = st.slider("🚗 Car Speed (ms/step)", 20, 300, 60, step=10,
-                                 help="Lower value = faster car movement")
         show_paths  = st.checkbox("Show Driver Paths", value=True)
         show_zones  = st.checkbox("Show Accident Zones", value=True)
 
@@ -568,7 +556,6 @@ def main():
         center_lng      = center_lng,
         highlight_point = highlight_point,
         show_car        = st.session_state.running,
-        car_speed       = car_speed,
     )
     components.html(map_html, height=700, scrolling=False)
 
