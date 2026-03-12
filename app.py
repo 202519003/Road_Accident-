@@ -1,6 +1,6 @@
 """
 Road Accident Risk Navigation Dashboard
-Uses Supabase for data + Leaflet.js for map visualization
+Uses Supabase PostgreSQL + Leaflet.js (moving car + smart zone alerts)
 """
 
 import streamlit as st
@@ -8,12 +8,10 @@ import streamlit.components.v1 as components
 import pandas as pd
 import json
 import struct
-import math
-import os
-from supabase import create_client, Client
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from geopy.geocoders import Nominatim
 from geopy.distance import geodesic
-import time
 
 # ─────────────────────────────────────────────
 # 1. PAGE CONFIGURATION
@@ -27,29 +25,20 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-    /* Dark theme accents */
     .main { background-color: #0e1117; }
     .block-container { padding-top: 1rem; }
-    .stButton > button {
-        border-radius: 8px;
-        font-weight: 600;
-        transition: all 0.2s;
-    }
+    .stButton > button { border-radius: 8px; font-weight: 600; transition: all 0.2s; }
     .alert-safe    { background:#1a3a1a; border-left:4px solid #00c853; padding:10px 14px; border-radius:6px; margin:6px 0; }
     .alert-warning { background:#3a2a00; border-left:4px solid #ffd600; padding:10px 14px; border-radius:6px; margin:6px 0; }
     .alert-danger  { background:#3a0000; border-left:4px solid #d50000; padding:10px 14px; border-radius:6px; margin:6px 0; }
-    .metric-card   { background:#1c1f26; border-radius:10px; padding:14px; text-align:center; }
     .footer-bar    { background:#1c1f26; border-top:1px solid #333; padding:12px 0; text-align:center;
                      color:#888; font-size:0.8rem; margin-top:2rem; border-radius:0 0 8px 8px; }
 </style>
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
-# 2. SUPABASE DATA CONNECTION (PostgreSQL Direct)
+# 2. SUPABASE DATA CONNECTION
 # ─────────────────────────────────────────────
-import psycopg2
-from psycopg2.extras import RealDictCursor
-
 def get_db_connection():
     return psycopg2.connect(
         host     = st.secrets["DB_HOST"],
@@ -60,8 +49,7 @@ def get_db_connection():
         sslmode  = "require"
     )
 
-
-@st.cache_data(ttl=300, show_spinner="Loading accident zones…")
+@st.cache_data(ttl=300, show_spinner="Loading accident zones...")
 def load_accident_data() -> pd.DataFrame:
     conn = get_db_connection()
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -69,17 +57,16 @@ def load_accident_data() -> pd.DataFrame:
         rows = cur.fetchall()
     conn.close()
     df = pd.DataFrame(rows)
-    df["latitude"]        = pd.to_numeric(df["latitude"],        errors="coerce")
-    df["longitude"]       = pd.to_numeric(df["longitude"],       errors="coerce")
-    df["total_accident"]  = pd.to_numeric(df["total_accident"],  errors="coerce").fillna(0)
-    df["total_fatality"]  = pd.to_numeric(df["total_fatality"],  errors="coerce").fillna(0)
-    df["severity_index"]  = pd.to_numeric(df["severity_index"],  errors="coerce").fillna(0)
+    df["latitude"]       = pd.to_numeric(df["latitude"],       errors="coerce")
+    df["longitude"]      = pd.to_numeric(df["longitude"],      errors="coerce")
+    df["total_accident"] = pd.to_numeric(df["total_accident"], errors="coerce").fillna(0)
+    df["total_fatality"] = pd.to_numeric(df["total_fatality"], errors="coerce").fillna(0)
+    df["severity_index"] = pd.to_numeric(df["severity_index"], errors="coerce").fillna(0)
     df.dropna(subset=["latitude", "longitude"], inplace=True)
     return df
 
-
-@st.cache_data(ttl=300, show_spinner="Loading driver path…")
-def load_driver_path() -> list[dict]:
+@st.cache_data(ttl=300, show_spinner="Loading driver path...")
+def load_driver_path() -> list:
     conn = get_db_connection()
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute("SELECT * FROM driver_path;")
@@ -87,11 +74,11 @@ def load_driver_path() -> list[dict]:
     conn.close()
     all_paths = []
     for row in rows:
-        coords = decode_wkb_linestring(row.get("geom", ""))
+        coords = decode_wkb_linestring(str(row.get("geom", "")))
         if coords:
             all_paths.append({
-                "id":         row.get("id"),
-                "created_at": row.get("created_at"),
+                "id": row.get("id"),
+                "created_at": str(row.get("created_at", "")),
                 "coordinates": coords
             })
     return all_paths
@@ -99,13 +86,11 @@ def load_driver_path() -> list[dict]:
 # ─────────────────────────────────────────────
 # 3. WKB GEOMETRY DECODER
 # ─────────────────────────────────────────────
-def decode_wkb_linestring(hex_wkb: str) -> list[list[float]]:
-    """Decode PostGIS hex WKB LineString → [[lat, lng], ...]"""
+def decode_wkb_linestring(hex_wkb: str) -> list:
     try:
         raw = bytes.fromhex(hex_wkb)
-        byte_order = raw[0]          # 1 = little-endian
+        byte_order = raw[0]
         endian = "<" if byte_order == 1 else ">"
-        # Skip: byte_order(1) + wkb_type(4) + srid(4) = 9 bytes
         offset = 9
         num_points = struct.unpack_from(endian + "I", raw, offset)[0]
         offset += 4
@@ -113,20 +98,18 @@ def decode_wkb_linestring(hex_wkb: str) -> list[list[float]]:
         for _ in range(num_points):
             x, y = struct.unpack_from(endian + "dd", raw, offset)
             offset += 16
-            coords.append([y, x])   # [lat, lng]
+            coords.append([y, x])
         return coords
     except Exception:
         return []
 
-
 # ─────────────────────────────────────────────
 # 4. GEOCODER
 # ─────────────────────────────────────────────
-@st.cache_data(ttl=600, show_spinner="Geocoding location…")
-def geocode_location(address: str) -> tuple[float, float] | None:
-    """Return (lat, lon) for a free-text address."""
+@st.cache_data(ttl=600, show_spinner="Geocoding location...")
+def geocode_location(address: str):
     try:
-        geolocator = Nominatim(user_agent="road_risk_navigator_v1", timeout=10)
+        geolocator = Nominatim(user_agent="road_risk_navigator_v2", timeout=10)
         result = geolocator.geocode(address)
         if result:
             return result.latitude, result.longitude
@@ -135,15 +118,11 @@ def geocode_location(address: str) -> tuple[float, float] | None:
         st.warning(f"Geocoding error: {e}")
         return None
 
-
 # ─────────────────────────────────────────────
 # 5. RISK CHECK FUNCTIONS
 # ─────────────────────────────────────────────
-RISK_RADIUS_M = 500   # metres around a point to flag as risky
-
 def check_risk_at_point(lat: float, lon: float, accident_df: pd.DataFrame,
-                         radius_m: int = RISK_RADIUS_M) -> dict:
-    """Return risk info for a given coordinate."""
+                         radius_m: int = 500) -> dict:
     nearby = []
     for _, row in accident_df.iterrows():
         dist = geodesic((lat, lon), (row["latitude"], row["longitude"])).meters
@@ -160,45 +139,17 @@ def check_risk_at_point(lat: float, lon: float, accident_df: pd.DataFrame,
         "message": f"{len(nearby)} accident zone(s) within {radius_m}m — max severity {max_si:.1f}"
     }
 
-
-def get_path_risk_alerts(path_coords: list[list[float]],
-                          accident_df: pd.DataFrame) -> list[dict]:
-    """Walk driver path and generate alerts for each risky point."""
-    alerts = []
-    seen_zones = set()
-    step = max(1, len(path_coords) // 50)   # sample at most 50 points
-    for i, (lat, lng) in enumerate(path_coords[::step]):
-        risk = check_risk_at_point(lat, lng, accident_df)
-        for zone in risk["zones"]:
-            zid = zone["id"]
-            if zid not in seen_zones:
-                seen_zones.add(zid)
-                alerts.append({
-                    "path_idx": i * step,
-                    "lat": lat,
-                    "lng": lng,
-                    "zone_id": zid,
-                    "area": zone.get("area", ""),
-                    "location": zone.get("location", ""),
-                    "risk_level": zone.get("risk_level", risk["level"]),
-                    "severity_index": zone.get("severity_index", 0),
-                    "distance_m": zone["distance_m"],
-                })
-    return alerts
-
-
 # ─────────────────────────────────────────────
-# 6. LEAFLET MAP BUILDER
+# 6. LEAFLET MAP WITH MOVING CAR + SMART ALERTS
 # ─────────────────────────────────────────────
 def build_leaflet_map(accident_df: pd.DataFrame,
-                       driver_paths: list[dict],
+                       driver_paths: list,
                        center_lat: float = 19.076,
                        center_lng: float = 72.877,
-                       highlight_point: tuple = None,
-                       alerts: list[dict] = None) -> str:
-    """Return full HTML string with embedded Leaflet map."""
+                       highlight_point=None,
+                       show_car: bool = True,
+                       car_speed: int = 60) -> str:
 
-    # Serialize data to JS-safe JSON
     zones_js = json.dumps([
         {
             "id":   int(r["id"]),
@@ -210,18 +161,13 @@ def build_leaflet_map(accident_df: pd.DataFrame,
             "risk": str(r.get("risk_level", "Low")),
             "ta":   int(r.get("total_accident", 0)),
             "tf":   int(r.get("total_fatality", 0)),
-            "color": str(r.get("buffer_color", "#FFFF00")),
         }
         for _, r in accident_df.iterrows()
     ])
 
-    paths_js = json.dumps([
-        {"id": p["id"], "coords": p["coordinates"]}
-        for p in driver_paths
-    ])
-
+    paths_js     = json.dumps([{"id": p["id"], "coords": p["coordinates"]} for p in driver_paths])
     highlight_js = json.dumps(list(highlight_point) if highlight_point else None)
-    alerts_js = json.dumps(alerts or [])
+    show_car_js  = "true" if show_car else "false"
 
     html = f"""<!DOCTYPE html>
 <html>
@@ -231,139 +177,288 @@ def build_leaflet_map(accident_df: pd.DataFrame,
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
-  body, html {{ margin:0; padding:0; height:100%; background:#0e1117; }}
-  #map {{ height:100vh; width:100%; }}
-  .risk-popup b {{ font-size:1rem; }}
-  .legend {{ background:rgba(20,20,30,0.92); color:#eee; padding:10px 14px;
-             border-radius:8px; font-size:0.78rem; line-height:1.7; box-shadow:0 2px 10px #0005; }}
-  .legend h4 {{ margin:0 0 6px 0; font-size:0.85rem; border-bottom:1px solid #444; padding-bottom:4px; }}
-  .dot {{ width:12px; height:12px; border-radius:50%; display:inline-block; margin-right:6px; vertical-align:middle; }}
+  * {{ box-sizing:border-box; margin:0; padding:0; }}
+  body, html {{ height:100%; background:#0e1117; font-family:sans-serif; }}
+  #wrapper {{ display:flex; flex-direction:column; height:100vh; }}
+  #map {{ flex:1; min-height:0; }}
+
+  #alertFeed {{
+    background:#0d1117;
+    border-top:2px solid #1e90ff33;
+    height:115px;
+    overflow-y:auto;
+    padding:6px 10px;
+    display:flex;
+    flex-direction:column;
+    gap:3px;
+    flex-shrink:0;
+  }}
+  .af-item {{
+    display:flex; align-items:center; gap:8px;
+    padding:5px 10px; border-radius:6px;
+    font-size:0.77rem; font-weight:500; color:#fff;
+    animation: slideIn 0.3s ease;
+  }}
+  @keyframes slideIn {{ from{{opacity:0;transform:translateY(-5px)}} to{{opacity:1;transform:none}} }}
+  .af-approaching {{ background:#0d1f2d; border-left:3px solid #00e5ff; }}
+  .af-entered     {{ background:#2a0000; border-left:3px solid #d50000; }}
+  .af-left        {{ background:#0d2a0d; border-left:3px solid #00c853; }}
+  .af-safe        {{ background:#0d2a0d; border-left:3px solid #00c853; }}
+
+  .legend {{ background:rgba(14,17,23,0.92); color:#eee; padding:10px 14px;
+             border-radius:8px; font-size:0.76rem; line-height:1.8; box-shadow:0 2px 10px #0006; }}
+  .legend h4 {{ margin:0 0 5px; font-size:0.82rem; border-bottom:1px solid #333; padding-bottom:3px; }}
+  .dot {{ width:11px; height:11px; border-radius:50%; display:inline-block; margin-right:5px; vertical-align:middle; }}
+
+  #speedBox {{
+    background:rgba(14,17,23,0.9); color:#eee;
+    padding:8px 12px; border-radius:8px; font-size:0.76rem;
+  }}
+  #speedBox label {{ display:block; margin-bottom:4px; color:#aaa; }}
+  #speedSlider {{ width:130px; accent-color:#1e90ff; }}
 </style>
 </head>
 <body>
-<div id="map"></div>
+<div id="wrapper">
+  <div id="map"></div>
+  <div id="alertFeed">
+    <div class="af-item af-safe">🟢 &nbsp; Press <b>Start</b> in the sidebar to begin car simulation…</div>
+  </div>
+</div>
+
 <script>
-const ZONES  = {zones_js};
-const PATHS  = {paths_js};
-const HLIGHT = {highlight_js};
-const ALERTS = {alerts_js};
+const ZONES    = {zones_js};
+const PATHS    = {paths_js};
+const HLIGHT   = {highlight_js};
+const SHOW_CAR = {show_car_js};
+const APPROACH_R = 500;
+const ENTER_R    = 120;
 
-// ── MAP INIT ──────────────────────────────
-const map = L.map('map', {{ zoomControl:true, preferCanvas:true }})
-              .setView([{center_lat}, {center_lng}], 12);
-
+// ── MAP INIT ─────────────────────────────────
+const map = L.map('map', {{zoomControl:true, preferCanvas:true}})
+              .setView([{center_lat}, {center_lng}], 13);
 L.tileLayer('https://{{s}}.basemaps.cartocdn.com/dark_all/{{z}}/{{x}}/{{y}}{{r}}.png', {{
-  attribution:'&copy; OpenStreetMap &copy; CartoDB',
-  subdomains:'abcd', maxZoom:19
+  attribution:'© OpenStreetMap © CartoDB', subdomains:'abcd', maxZoom:19
 }}).addTo(map);
 
-// ── HELPER: severity → colour ─────────────
+// ── HELPERS ──────────────────────────────────
 function siColor(si) {{
   if (si > 25) return '#d50000';
   if (si > 10) return '#ff6d00';
   return '#ffd600';
 }}
-function riskIcon(color) {{
-  return L.divIcon({{
-    className: '',
-    html: `<div style="width:14px;height:14px;border-radius:50%;
-                background:${{color}};border:2px solid #fff;
-                box-shadow:0 0 6px ${{color}}88"></div>`,
-    iconSize:[14,14], iconAnchor:[7,7]
-  }});
+function haversineM(lat1,lng1,lat2,lng2) {{
+  const R=6371000,
+        dLat=(lat2-lat1)*Math.PI/180,
+        dLng=(lng2-lng1)*Math.PI/180,
+        a=Math.sin(dLat/2)**2+Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLng/2)**2;
+  return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+}}
+function addAlert(msg, cls) {{
+  const feed = document.getElementById('alertFeed');
+  const div  = document.createElement('div');
+  div.className = 'af-item ' + cls;
+  div.innerHTML = msg;
+  feed.prepend(div);
+  while (feed.children.length > 30) feed.removeChild(feed.lastChild);
 }}
 
-// ── ACCIDENT ZONES ────────────────────────
+// ── ACCIDENT ZONES ────────────────────────────
 const zoneLayer = L.layerGroup().addTo(map);
 ZONES.forEach(z => {{
   const col = siColor(z.si);
-  const marker = L.marker([z.lat, z.lng], {{ icon: riskIcon(col) }});
-  marker.bindPopup(`
-    <b>🚨 ${{z.area}}</b><br>
-    <small>${{z.loc}}</small><hr style="margin:4px 0">
-    Severity Index : <b>${{z.si.toFixed(1)}}</b><br>
-    Risk Level     : <b style="color:${{col}}">${{z.risk}}</b><br>
-    Total Accidents: <b>${{z.ta}}</b><br>
-    Fatalities     : <b>${{z.tf}}</b>
-  `, {{ maxWidth:220 }});
-  // Buffer circle (500m)
-  L.circle([z.lat, z.lng], {{
-    radius:500, color:col, fillColor:col,
-    fillOpacity:0.12, weight:1.5, dashArray:'4 4'
+  // Outer approach ring
+  L.circle([z.lat,z.lng], {{
+    radius:APPROACH_R, color:col, fillColor:col,
+    fillOpacity:0.10, weight:1.5, dashArray:'6 4'
   }}).addTo(map);
-  marker.addTo(zoneLayer);
-}});
-
-// ── DRIVER PATHS ──────────────────────────
-const pathLayer = L.layerGroup().addTo(map);
-const PATH_COLORS = ['#00e5ff','#69ff47','#ff4081','#e040fb','#ffab40'];
-PATHS.forEach((p, i) => {{
-  if (!p.coords || p.coords.length < 2) return;
-  const color = PATH_COLORS[i % PATH_COLORS.length];
-  const poly = L.polyline(p.coords, {{ color, weight:4, opacity:0.85 }});
-  poly.bindPopup(`<b>Driver Path #${{p.id}}</b><br>Points: ${{p.coords.length}}`);
-  poly.addTo(pathLayer);
-  // Start/End markers
-  const startIcon = L.divIcon({{ className:'',
-    html:`<div style="background:#00c853;width:12px;height:12px;border-radius:50%;border:2px solid #fff"></div>`,
-    iconSize:[12,12], iconAnchor:[6,6] }});
-  const endIcon = L.divIcon({{ className:'',
-    html:`<div style="background:#d50000;width:12px;height:12px;border-radius:50%;border:2px solid #fff"></div>`,
-    iconSize:[12,12], iconAnchor:[6,6] }});
-  L.marker(p.coords[0], {{ icon:startIcon }}).bindTooltip('Start').addTo(pathLayer);
-  L.marker(p.coords[p.coords.length-1], {{ icon:endIcon }}).bindTooltip('End').addTo(pathLayer);
-}});
-
-// ── ALERT MARKERS ON PATH ─────────────────
-const alertLayer = L.layerGroup().addTo(map);
-ALERTS.forEach(a => {{
-  const col = a.risk_level === 'High' ? '#d50000' : (a.risk_level === 'Medium' ? '#ff6d00' : '#ffd600');
-  L.circleMarker([a.lat, a.lng], {{
-    radius:9, color:col, fillColor:col, fillOpacity:0.5, weight:2
-  }}).bindPopup(`
-    <b>⚠️ Alert: ${{a.area}}</b><br>
-    ${{a.location}}<br>
-    Risk: <b style="color:${{col}}">${{a.risk_level}}</b><br>
-    Distance: ${{a.distance_m}} m
-  `).addTo(alertLayer);
-}});
-
-// ── HIGHLIGHT / SEARCH POINT ──────────────
-if (HLIGHT) {{
-  const hl = L.marker(HLIGHT, {{
+  // Inner entered ring
+  L.circle([z.lat,z.lng], {{
+    radius:ENTER_R, color:col, fillColor:col,
+    fillOpacity:0.28, weight:2
+  }}).addTo(map);
+  // Marker
+  L.marker([z.lat,z.lng], {{
     icon: L.divIcon({{
       className:'',
-      html:`<div style="background:#00e5ff;width:18px;height:18px;
-                 border-radius:50%;border:3px solid #fff;
-                 box-shadow:0 0 12px #00e5ff"></div>`,
-      iconSize:[18,18], iconAnchor:[9,9]
+      html:`<div style="width:13px;height:13px;border-radius:50%;background:${{col}};
+                 border:2px solid #fff;box-shadow:0 0 7px ${{col}}99"></div>`,
+      iconSize:[13,13], iconAnchor:[6,6]
     }})
-  }}).addTo(map);
-  hl.bindPopup('<b>📍 Your Location</b>').openPopup();
+  }}).bindPopup(`
+    <b>🚨 ${{z.area}}</b><br><small>${{z.loc}}</small>
+    <hr style="margin:4px 0">
+    Severity: <b>${{z.si.toFixed(1)}}</b> | Risk: <b style="color:${{col}}">${{z.risk}}</b><br>
+    Accidents: <b>${{z.ta}}</b> | Fatalities: <b>${{z.tf}}</b>
+  `,{{maxWidth:220}}).addTo(zoneLayer);
+}});
+
+// ── DRIVER PATHS ──────────────────────────────
+const pathLayer = L.layerGroup().addTo(map);
+const PATH_COLORS = ['#00e5ff','#69ff47','#ff4081','#e040fb','#ffab40'];
+PATHS.forEach((p,i) => {{
+  if (!p.coords || p.coords.length < 2) return;
+  const col = PATH_COLORS[i % PATH_COLORS.length];
+  L.polyline(p.coords, {{color:col, weight:4, opacity:0.65, dashArray:'8 5'}})
+   .bindPopup(`<b>Driver Path #${{p.id}}</b> — ${{p.coords.length}} points`)
+   .addTo(pathLayer);
+  L.marker(p.coords[0], {{icon:L.divIcon({{className:'',
+    html:`<div style="background:#00c853;width:14px;height:14px;border-radius:50%;
+               border:2px solid #fff;box-shadow:0 0 8px #00c853"></div>`,
+    iconSize:[14,14],iconAnchor:[7,7]}})
+  }}).bindTooltip('🟢 Start').addTo(pathLayer);
+  L.marker(p.coords[p.coords.length-1], {{icon:L.divIcon({{className:'',
+    html:`<div style="background:#d50000;width:14px;height:14px;border-radius:50%;
+               border:2px solid #fff;box-shadow:0 0 8px #d50000"></div>`,
+    iconSize:[14,14],iconAnchor:[7,7]}})
+  }}).bindTooltip('🔴 End').addTo(pathLayer);
+}});
+
+// ── SEARCHED LOCATION ────────────────────────
+if (HLIGHT) {{
+  L.marker(HLIGHT, {{icon:L.divIcon({{className:'',
+    html:`<div style="background:#00e5ff;width:18px;height:18px;border-radius:50%;
+               border:3px solid #fff;box-shadow:0 0 14px #00e5ff"></div>`,
+    iconSize:[18,18],iconAnchor:[9,9]}})
+  }}).bindPopup('<b>📍 Searched Location</b>').addTo(map).openPopup();
   map.setView(HLIGHT, 14);
 }}
 
-// ── LAYER CONTROL ─────────────────────────
+// ── LAYER CONTROL ─────────────────────────────
 L.control.layers(null, {{
   'Accident Zones': zoneLayer,
   'Driver Paths'  : pathLayer,
-  'Path Alerts'   : alertLayer,
-}}, {{ collapsed:false }}).addTo(map);
+}}, {{collapsed:false}}).addTo(map);
 
-// ── LEGEND ───────────────────────────────
-const legend = L.control({{ position:'bottomright' }});
+// ── LEGEND ───────────────────────────────────
+const legend = L.control({{position:'bottomright'}});
 legend.onAdd = () => {{
   const d = L.DomUtil.create('div','legend');
-  d.innerHTML = `<h4>🗺 Risk Legend</h4>
-    <span class="dot" style="background:#d50000"></span> High Risk<br>
-    <span class="dot" style="background:#ff6d00"></span> Medium Risk<br>
-    <span class="dot" style="background:#ffd600"></span> Low Risk<br>
-    <span class="dot" style="background:#00e5ff"></span> Driver Path<br>
-    <span class="dot" style="background:#00c853"></span> Path Start<br>
-    <span class="dot" style="background:#d50000"></span> Path End`;
+  d.innerHTML = `<h4>🗺 Legend</h4>
+    <span class="dot" style="background:#d50000"></span>High Risk<br>
+    <span class="dot" style="background:#ff6d00"></span>Medium Risk<br>
+    <span class="dot" style="background:#ffd600"></span>Low Risk<br>
+    <span class="dot" style="background:#00e5ff"></span>Driver Path<br>
+    <span class="dot" style="background:#1e90ff"></span>🚗 Car`;
   return d;
 }};
 legend.addTo(map);
+
+// ── SPEED CONTROL ─────────────────────────────
+const speedCtrl = L.control({{position:'topleft'}});
+speedCtrl.onAdd = () => {{
+  const d = L.DomUtil.create('div', '');
+  d.id = 'speedBox';
+  d.innerHTML = `<label>🚗 Animation Speed</label>
+    <input id="speedSlider" type="range" min="20" max="300" value="{car_speed}" step="10">
+    <span id="speedVal">{car_speed}ms</span>`;
+  L.DomEvent.disableClickPropagation(d);
+  return d;
+}};
+speedCtrl.addTo(map);
+document.addEventListener('input', e => {{
+  if (e.target.id==='speedSlider')
+    document.getElementById('speedVal').textContent = e.target.value + 'ms';
+}});
+
+// ── MOVING CAR SIMULATION ─────────────────────
+if (SHOW_CAR && PATHS.length > 0) {{
+  const carIcon = L.divIcon({{
+    className: '',
+    html: `<div style="font-size:24px;line-height:1;filter:drop-shadow(0 0 5px #1e90ff)">🚗</div>`,
+    iconSize:[26,26], iconAnchor:[13,13]
+  }});
+
+  const carMarker = L.marker(PATHS[0].coords[0], {{icon:carIcon, zIndexOffset:1000}}).addTo(map);
+  const trailPts  = [];
+  const trailLine = L.polyline([], {{color:'#1e90ff', weight:3, opacity:0.55}}).addTo(map);
+
+  // Per-zone state: null | 'approaching' | 'entered'
+  const zoneState = {{}};
+
+  function checkZones(lat, lng) {{
+    ZONES.forEach(z => {{
+      const dist = haversineM(lat, lng, z.lat, z.lng);
+      const prev = zoneState[z.id] || null;
+
+      if (dist <= ENTER_R) {{
+        // Inside zone
+        if (prev !== 'entered') {{
+          zoneState[z.id] = 'entered';
+          addAlert(
+            `🚨 <b>Entered Risk Zone</b> — ${{z.area}} | ${{z.loc}} | Severity ${{z.si.toFixed(1)}}`,
+            'af-entered'
+          );
+        }}
+      }} else if (dist <= APPROACH_R) {{
+        // Approaching
+        if (prev === 'entered') {{
+          // Was inside, now left
+          zoneState[z.id] = null;
+          addAlert(`✅ <b>Left Risk Zone — Safe</b> &nbsp;›&nbsp; ${{z.area}}`, 'af-left');
+        }} else if (prev !== 'approaching') {{
+          zoneState[z.id] = 'approaching';
+          addAlert(
+            `⚠️ <b>Approaching Risk Zone</b> — ${{z.area}} | ${{z.loc}} | ${{Math.round(dist)}}m ahead`,
+            'af-approaching'
+          );
+        }}
+      }} else {{
+        // Outside both rings
+        if (prev === 'entered') {{
+          zoneState[z.id] = null;
+          addAlert(`✅ <b>Left Risk Zone — Safe</b> &nbsp;›&nbsp; ${{z.area}}`, 'af-left');
+        }} else if (prev === 'approaching') {{
+          zoneState[z.id] = null;
+          // passed without entering — just clear silently
+        }}
+      }}
+    }});
+  }}
+
+  let pathIdx = 0, ptIdx = 0;
+
+  function step() {{
+    const spd = parseInt(document.getElementById('speedSlider')?.value || {car_speed});
+
+    if (pathIdx >= PATHS.length) {{
+      carMarker.setIcon(L.divIcon({{
+        className:'',
+        html:`<div style="font-size:24px">🏁</div>`,
+        iconSize:[26,26], iconAnchor:[13,13]
+      }}));
+      addAlert('🏁 <b>Simulation complete — Destination reached safely!</b>', 'af-safe');
+      return;
+    }}
+
+    const coords = PATHS[pathIdx].coords;
+
+    if (ptIdx >= coords.length) {{
+      pathIdx++;
+      ptIdx = 0;
+      if (pathIdx < PATHS.length)
+        addAlert(`🟢 <b>Starting Path #${{PATHS[pathIdx].id}}</b>`, 'af-safe');
+      setTimeout(step, spd);
+      return;
+    }}
+
+    const [lat, lng] = coords[ptIdx];
+    carMarker.setLatLng([lat, lng]);
+    trailPts.push([lat, lng]);
+    trailLine.setLatLngs(trailPts);
+
+    // Pan map to follow car smoothly
+    if (!map.getBounds().contains([lat, lng]))
+      map.panTo([lat, lng], {{animate:true, duration:0.4}});
+
+    checkZones(lat, lng);
+    ptIdx++;
+    setTimeout(step, spd);
+  }}
+
+  addAlert(`🟢 <b>Starting simulation on Path #${{PATHS[0].id}}</b>`, 'af-safe');
+  step();
+}}
 </script>
 </body>
 </html>"""
@@ -371,12 +466,11 @@ legend.addTo(map);
 
 
 # ─────────────────────────────────────────────
-# 7. ALERT DISPLAY HELPERS
+# 7. ALERT DISPLAY HELPER
 # ─────────────────────────────────────────────
 def alert_box(level: str, text: str):
-    css = {"SAFE": "alert-safe", "LOW": "alert-safe",
-           "MEDIUM": "alert-warning", "HIGH": "alert-danger"}.get(level.upper(), "alert-warning")
-    icon = {"SAFE": "✅", "LOW": "🟡", "MEDIUM": "⚠️", "HIGH": "🚨"}.get(level.upper(), "ℹ️")
+    css  = {"SAFE":"alert-safe","LOW":"alert-safe","MEDIUM":"alert-warning","HIGH":"alert-danger"}.get(level.upper(),"alert-warning")
+    icon = {"SAFE":"✅","LOW":"🟡","MEDIUM":"⚠️","HIGH":"🚨"}.get(level.upper(),"ℹ️")
     st.markdown(f'<div class="{css}">{icon} <b>{level}</b> — {text}</div>', unsafe_allow_html=True)
 
 
@@ -391,38 +485,36 @@ def main():
         st.caption("Powered by Supabase + Leaflet")
         st.divider()
 
-        # Controls
         st.subheader("🎮 Session Controls")
         col1, col2 = st.columns(2)
         with col1:
             start_btn = st.button("▶ Start", use_container_width=True, type="primary")
         with col2:
             stop_btn  = st.button("⏹ Stop",  use_container_width=True)
-        run_btn = st.button("🔄 Run / Refresh", use_container_width=True)
+        st.button("🔄 Run / Refresh", use_container_width=True)
 
         if "running" not in st.session_state:
             st.session_state.running = False
-
         if start_btn:
             st.session_state.running = True
-            st.success("Session started!")
+            st.success("Session started! Car simulation active on map.")
         if stop_btn:
             st.session_state.running = False
             st.warning("Session stopped.")
 
         st.divider()
 
-        # Location search
         st.subheader("📍 Location Search")
         address_input = st.text_input("Search address / place", placeholder="e.g. Andheri, Mumbai")
         search_btn    = st.button("🔍 Find & Check Risk", use_container_width=True)
 
         st.divider()
 
-        # Filters
-        st.subheader("🔧 Filters")
+        st.subheader("🔧 Filters & Settings")
         risk_filter = st.multiselect("Risk Level", ["High", "Medium", "Low"], default=["High", "Medium", "Low"])
-        radius_m    = st.slider("Alert Radius (m)", 100, 2000, 500, step=100)
+        radius_m    = st.slider("Search Alert Radius (m)", 100, 2000, 500, step=100)
+        car_speed   = st.slider("🚗 Car Speed (ms/step)", 20, 300, 60, step=10,
+                                 help="Lower value = faster car movement")
         show_paths  = st.checkbox("Show Driver Paths", value=True)
         show_zones  = st.checkbox("Show Accident Zones", value=True)
 
@@ -430,35 +522,22 @@ def main():
     accident_df  = load_accident_data()
     driver_paths = load_driver_path()
 
-    # Apply risk filter
-    if risk_filter:
-        filtered_df = accident_df[accident_df["risk_level"].isin(risk_filter)]
-    else:
-        filtered_df = accident_df
-
-    if not show_zones:
-        display_df = accident_df.iloc[0:0]   # empty
-    else:
-        display_df = filtered_df
-
+    filtered_df   = accident_df[accident_df["risk_level"].isin(risk_filter)] if risk_filter else accident_df
+    display_df    = filtered_df if show_zones else accident_df.iloc[0:0]
     display_paths = driver_paths if show_paths else []
 
     # ── Header KPIs ──────────────────────────
     st.title("🚦 Road Accident Risk Dashboard")
-
     k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("Total Hotspots",   len(accident_df))
     k2.metric("High Risk Zones",  int((accident_df["risk_level"] == "High").sum()))
     k3.metric("Total Accidents",  int(accident_df["total_accident"].sum()))
     k4.metric("Total Fatalities", int(accident_df["total_fatality"].sum()))
     k5.metric("Driver Paths",     len(driver_paths))
-
     st.divider()
 
     # ── Geocode + Risk Check ──────────────────
     highlight_point = None
-    search_alerts   = []
-
     if search_btn and address_input:
         coords = geocode_location(address_input)
         if coords:
@@ -466,83 +545,45 @@ def main():
             risk_info = check_risk_at_point(coords[0], coords[1], accident_df, radius_m)
             st.subheader("📊 Risk Assessment")
             alert_box(risk_info["level"], risk_info["message"])
-
             if risk_info["zones"]:
                 near_df = pd.DataFrame(risk_info["zones"])[
-                    ["area", "location", "risk_level", "severity_index",
-                     "total_accident", "total_fatality", "distance_m"]
+                    ["area","location","risk_level","severity_index",
+                     "total_accident","total_fatality","distance_m"]
                 ].sort_values("distance_m")
                 st.dataframe(near_df, use_container_width=True, hide_index=True)
-                search_alerts = [
-                    {"lat": coords[0], "lng": coords[1],
-                     "area": z.get("area",""), "location": z.get("location",""),
-                     "risk_level": z.get("risk_level","Low"),
-                     "severity_index": z.get("severity_index",0),
-                     "distance_m": z.get("distance_m",0)}
-                    for z in risk_info["zones"]
-                ]
         else:
             st.error("Location not found. Try a more specific address.")
 
-    # ── Path Alerts ───────────────────────────
-    path_alerts: list[dict] = []
-    if st.session_state.running and driver_paths:
-        with st.spinner("Analysing driver path for risk zones…"):
-            for p in driver_paths:
-                path_alerts += get_path_risk_alerts(p["coordinates"], accident_df)
-
-    combined_alerts = search_alerts + path_alerts
-
-    # ── Alert Panel (while running) ───────────
-    if st.session_state.running:
-        st.subheader("🚨 Live Path Alerts")
-        if path_alerts:
-            for a in sorted(path_alerts, key=lambda x: x["severity_index"], reverse=True)[:10]:
-                level = a.get("risk_level", "Low").upper()
-                msg   = f"{a['area']} — {a['location']} | Severity: {a['severity_index']:.1f} | {a['distance_m']} m away"
-                alert_box(level, msg)
-        else:
-            alert_box("SAFE", "Driver path is clear of high-risk zones within the current radius.")
-
-        # Entry / Exit alerts
-        for p in driver_paths:
-            if p["coordinates"]:
-                st.info(f"🟢 **Approaching** Driver Path #{p['id']} — Start point entered.")
-                st.info(f"🔴 **Exiting**    Driver Path #{p['id']} — Destination reached safely.")
-
     # ── Map ───────────────────────────────────
-    st.subheader("🗺️ Interactive Risk Map")
+    st.subheader("🗺️ Interactive Risk Map  •  🚗 Live Car Simulation")
+    st.caption("The 🚗 car moves along the driver path. The alert feed at the bottom of the map shows real-time zone alerts.")
 
-    # Compute center from data
     center_lat = float(display_df["latitude"].mean())  if not display_df.empty else 19.076
     center_lng = float(display_df["longitude"].mean()) if not display_df.empty else 72.877
 
     map_html = build_leaflet_map(
-        accident_df   = display_df,
-        driver_paths  = display_paths,
-        center_lat    = center_lat,
-        center_lng    = center_lng,
+        accident_df     = display_df,
+        driver_paths    = display_paths,
+        center_lat      = center_lat,
+        center_lng      = center_lng,
         highlight_point = highlight_point,
-        alerts        = combined_alerts,
+        show_car        = st.session_state.running,
+        car_speed       = car_speed,
     )
-    components.html(map_html, height=600, scrolling=False)
+    components.html(map_html, height=700, scrolling=False)
 
-    # ── Data Table ────────────────────────────
+    # ── Data Tables ───────────────────────────
     with st.expander("📋 Accident Zone Data Table", expanded=False):
         st.dataframe(
-            filtered_df[[
-                "id","city","area","location","risk_level",
-                "severity_index","total_accident","total_fatality",
-                "latitude","longitude"
-            ]].sort_values("severity_index", ascending=False),
+            filtered_df[["id","city","area","location","risk_level",
+                          "severity_index","total_accident","total_fatality",
+                          "latitude","longitude"]].sort_values("severity_index", ascending=False),
             use_container_width=True, hide_index=True
         )
 
-    with st.expander("🛣️ Driver Path Raw Data", expanded=False):
+    with st.expander("🛣️ Driver Path Data", expanded=False):
         for p in driver_paths:
-            st.write(f"**Path #{p['id']}** — {len(p['coordinates'])} coordinate points | Created: {p.get('created_at','')}")
-            if p["coordinates"]:
-                st.json(p["coordinates"][:5])
+            st.write(f"**Path #{p['id']}** — {len(p['coordinates'])} coordinate points | {p.get('created_at','')}")
 
     # ── Footer ────────────────────────────────
     st.markdown("""
@@ -558,6 +599,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
