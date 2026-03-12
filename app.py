@@ -45,48 +45,54 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
-# 2. SUPABASE DATA CONNECTION
+# 2. SUPABASE DATA CONNECTION (PostgreSQL Direct)
 # ─────────────────────────────────────────────
+import psycopg2
+from psycopg2.extras import RealDictCursor
+
 @st.cache_resource(show_spinner="Connecting to Supabase…")
-def get_supabase_client() -> Client:
-    url = st.secrets.get("SUPABASE_URL", os.getenv("SUPABASE_URL", ""))
-    key = st.secrets.get("SUPABASE_KEY", os.getenv("SUPABASE_KEY", ""))
-    if not url or not key:
-        st.error("⚠️  Supabase credentials missing. Add SUPABASE_URL and SUPABASE_KEY to `.streamlit/secrets.toml` or environment variables.")
-        st.stop()
-    return create_client(url, key)
+def get_db_connection():
+    conn = psycopg2.connect(
+        host     = st.secrets.get("DB_HOST", "aws-1-ap-south-1.pooler.supabase.com"),
+        port     = int(st.secrets.get("DB_PORT", 5432)),
+        dbname   = st.secrets.get("DB_NAME", "postgres"),
+        user     = st.secrets.get("DB_USER", "postgres.ourldbbwnndtymlznzlo"),
+        password = st.secrets.get("DB_PASSWORD", ""),  # never hardcode
+        sslmode  = "require"
+    )
+    return conn
 
 
 @st.cache_data(ttl=300, show_spinner="Loading accident zones…")
-def load_accident_data(_client: Client) -> pd.DataFrame:
-    """Fetch accident hotspot table (export_123)."""
-    resp = _client.table("export_123").select("*").execute()
-    df = pd.DataFrame(resp.data)
-    df["latitude"]  = pd.to_numeric(df["latitude"],  errors="coerce")
-    df["longitude"] = pd.to_numeric(df["longitude"], errors="coerce")
-    df["total_accident"]  = pd.to_numeric(df.get("total_accident", 0),  errors="coerce").fillna(0)
-    df["total_fatality"]  = pd.to_numeric(df.get("total_fatality", 0),  errors="coerce").fillna(0)
-    df["severity_index"]  = pd.to_numeric(df.get("severity_index", 0),  errors="coerce").fillna(0)
+def load_accident_data(_conn) -> pd.DataFrame:
+    with _conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("SELECT * FROM export_123;")
+        rows = cur.fetchall()
+    df = pd.DataFrame(rows)
+    df["latitude"]        = pd.to_numeric(df["latitude"],        errors="coerce")
+    df["longitude"]       = pd.to_numeric(df["longitude"],       errors="coerce")
+    df["total_accident"]  = pd.to_numeric(df["total_accident"],  errors="coerce").fillna(0)
+    df["total_fatality"]  = pd.to_numeric(df["total_fatality"],  errors="coerce").fillna(0)
+    df["severity_index"]  = pd.to_numeric(df["severity_index"],  errors="coerce").fillna(0)
     df.dropna(subset=["latitude", "longitude"], inplace=True)
     return df
 
 
 @st.cache_data(ttl=300, show_spinner="Loading driver path…")
-def load_driver_path(_client: Client) -> list[dict]:
-    """Fetch driver path table and decode WKB LineString geometry."""
-    resp = _client.table("export_Driver_path").select("*").execute()
-    rows = resp.data
+def load_driver_path(_conn) -> list[dict]:
+    with _conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("SELECT * FROM export_Driver_path;")
+        rows = cur.fetchall()
     all_paths = []
     for row in rows:
         coords = decode_wkb_linestring(row.get("geom", ""))
         if coords:
             all_paths.append({
-                "id": row.get("id"),
+                "id":         row.get("id"),
                 "created_at": row.get("created_at"),
-                "coordinates": coords   # list of [lat, lng]
+                "coordinates": coords
             })
     return all_paths
-
 
 # ─────────────────────────────────────────────
 # 3. WKB GEOMETRY DECODER
@@ -419,9 +425,9 @@ def main():
         show_zones  = st.checkbox("Show Accident Zones", value=True)
 
     # ── Load Data ────────────────────────────
-    client       = get_supabase_client()
-    accident_df  = load_accident_data(client)
-    driver_paths = load_driver_path(client)
+    conn         = get_db_connection()    # connects via psycopg2
+    accident_df  = load_accident_data(conn)
+    driver_paths = load_driver_path(conn)
 
     # Apply risk filter
     if risk_filter:
@@ -551,3 +557,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
