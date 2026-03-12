@@ -181,70 +181,47 @@ def build_leaflet_map(accident_df: pd.DataFrame,
   #wrapper {{ display:flex; flex-direction:column; height:100vh; }}
   #map {{ flex:1; min-height:0; }}
 
-  /* ── Single alert bar (one message at a time) ── */
   #alertFeed {{
     background:#0d1117;
     border-top:2px solid #1e90ff33;
-    height:52px;
+    height:115px;
+    overflow-y:auto;
+    padding:6px 10px;
     display:flex;
-    align-items:center;
+    flex-direction:column;
+    gap:3px;
     flex-shrink:0;
-    padding:0 10px;
-    overflow:hidden;
   }}
-  #alertMsg {{
-    width:100%;
-    padding:8px 14px;
-    border-radius:6px;
-    font-size:0.82rem;
-    font-weight:600;
-    color:#fff;
-    border-left:4px solid #00c853;
-    background:#0d2a0d;
-    white-space:nowrap;
-    overflow:hidden;
-    text-overflow:ellipsis;
-    transition:background 0.25s, border-color 0.25s;
+  .af-item {{
+    display:flex; align-items:center; gap:8px;
+    padding:5px 10px; border-radius:6px;
+    font-size:0.77rem; font-weight:500; color:#fff;
+    animation: slideIn 0.3s ease;
   }}
-  #alertMsg.approaching {{ background:#0d1f2d; border-left-color:#00e5ff; }}
-  #alertMsg.entered     {{ background:#2a0000; border-left-color:#d50000; }}
-  #alertMsg.left        {{ background:#0d2a0d; border-left-color:#00c853; }}
-  #alertMsg.safe        {{ background:#0d2a0d; border-left-color:#00c853; }}
-
-  /* ── Floating map alert bubble ── */
-  #mapAlert {{
-    position:absolute;
-    top:14px; left:50%; transform:translateX(-50%);
-    z-index:1000;
-    padding:7px 22px;
-    border-radius:20px;
-    font-size:0.82rem;
-    font-weight:700;
-    color:#fff;
-    pointer-events:none;
-    opacity:0;
-    transition:opacity 0.3s;
-    white-space:nowrap;
-    box-shadow:0 2px 14px #0009;
-  }}
-  #mapAlert.show {{ opacity:1; }}
-  #mapAlert.ap  {{ background:rgba(0,60,100,0.93); border:1.5px solid #00e5ff; }}
-  #mapAlert.en  {{ background:rgba(100,0,0,0.95);  border:1.5px solid #ff3333; }}
-  #mapAlert.lft {{ background:rgba(0,70,20,0.93);  border:1.5px solid #00c853; }}
+  @keyframes slideIn {{ from{{opacity:0;transform:translateY(-5px)}} to{{opacity:1;transform:none}} }}
+  .af-approaching {{ background:#0d1f2d; border-left:3px solid #00e5ff; }}
+  .af-entered     {{ background:#2a0000; border-left:3px solid #d50000; }}
+  .af-left        {{ background:#0d2a0d; border-left:3px solid #00c853; }}
+  .af-safe        {{ background:#0d2a0d; border-left:3px solid #00c853; }}
 
   .legend {{ background:rgba(14,17,23,0.92); color:#eee; padding:10px 14px;
              border-radius:8px; font-size:0.76rem; line-height:1.8; box-shadow:0 2px 10px #0006; }}
   .legend h4 {{ margin:0 0 5px; font-size:0.82rem; border-bottom:1px solid #333; padding-bottom:3px; }}
   .dot {{ width:11px; height:11px; border-radius:50%; display:inline-block; margin-right:5px; vertical-align:middle; }}
+
+  #speedBox {{
+    background:rgba(14,17,23,0.9); color:#eee;
+    padding:8px 12px; border-radius:8px; font-size:0.76rem;
+  }}
+  #speedBox label {{ display:block; margin-bottom:4px; color:#aaa; }}
+  #speedSlider {{ width:130px; accent-color:#1e90ff; }}
 </style>
 </head>
 <body>
 <div id="wrapper">
-  <div id="map">
-    <div id="mapAlert"></div>
-  </div>
+  <div id="map"></div>
   <div id="alertFeed">
-    <div id="alertMsg" class="safe">🟢 &nbsp; Press <b>Start</b> in the sidebar to begin car simulation…</div>
+    <div class="af-item af-safe">🟢 &nbsp; Press <b>Start</b> in the sidebar to begin car simulation…</div>
   </div>
 </div>
 
@@ -277,22 +254,13 @@ function haversineM(lat1,lng1,lat2,lng2) {{
         a=Math.sin(dLat/2)**2+Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLng/2)**2;
   return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
 }}
-let mapAlertTimer = null;
-
-function addAlert(shortMsg, fullMsg, cls) {{
-  // ── Bottom bar: replace current message ──
-  const bar = document.getElementById('alertMsg');
-  bar.className = cls;
-  bar.innerHTML = fullMsg;
-
-  // ── Map floating bubble: short message only ──
-  const bubble = document.getElementById('mapAlert');
-  bubble.className = 'show ' + (cls==='approaching'?'ap': cls==='entered'?'en':'lft');
-  bubble.textContent = shortMsg;
-  if (mapAlertTimer) clearTimeout(mapAlertTimer);
-  mapAlertTimer = setTimeout(() => {{
-    bubble.className = '';
-  }}, 4000);
+function addAlert(msg, cls) {{
+  const feed = document.getElementById('alertFeed');
+  const div  = document.createElement('div');
+  div.className = 'af-item ' + cls;
+  div.innerHTML = msg;
+  feed.prepend(div);
+  while (feed.children.length > 30) feed.removeChild(feed.lastChild);
 }}
 
 // ── ACCIDENT ZONES ────────────────────────────
@@ -406,43 +374,25 @@ if (SHOW_CAR && PATHS.length > 0) {{
 
   function checkZones(lat, lng) {{
     ZONES.forEach(z => {{
-      const dist      = haversineM(lat, lng, z.lat, z.lng);
-      const prev      = zoneState[z.id] || null;
-      const riskLevel = z.risk ? z.risk.toUpperCase() : 'RISK';
-
+      const dist = haversineM(lat, lng, z.lat, z.lng);
+      const prev = zoneState[z.id] || null;
       if (dist <= ENTER_R) {{
         if (prev !== 'entered') {{
           zoneState[z.id] = 'entered';
-          addAlert(
-            `🚨 Entered ${{riskLevel}} Risk Zone: ${{z.area}}`,
-            `🚨 <b>Entered ${{riskLevel}} Risk Zone</b> — ${{z.area}} | ${{z.loc}} | Severity ${{z.si.toFixed(1)}}`,
-            'entered'
-          );
+          addAlert(`🚨 <b>Entered Risk Zone</b> — ${{z.area}} | ${{z.loc}} | Severity ${{z.si.toFixed(1)}}`, 'af-entered');
         }}
       }} else if (dist <= APPROACH_R) {{
         if (prev === 'entered') {{
           zoneState[z.id] = null;
-          addAlert(
-            `✅ Left ${{riskLevel}} Risk Zone — Safe: ${{z.area}}`,
-            `✅ <b>Left ${{riskLevel}} Risk Zone — Safe</b> &nbsp;›&nbsp; ${{z.area}}`,
-            'left'
-          );
+          addAlert(`✅ <b>Left Risk Zone — Safe</b> &nbsp;›&nbsp; ${{z.area}}`, 'af-left');
         }} else if (prev !== 'approaching') {{
           zoneState[z.id] = 'approaching';
-          addAlert(
-            `⚠️ Approaching ${{riskLevel}} Risk Zone: ${{z.area}} (${{Math.round(dist)}}m)`,
-            `⚠️ <b>Approaching ${{riskLevel}} Risk Zone</b> — ${{z.area}} | ${{z.loc}} | ${{Math.round(dist)}}m ahead`,
-            'approaching'
-          );
+          addAlert(`⚠️ <b>Approaching Risk Zone</b> — ${{z.area}} | ${{z.loc}} | ${{Math.round(dist)}}m ahead`, 'af-approaching');
         }}
       }} else {{
         if (prev === 'entered') {{
           zoneState[z.id] = null;
-          addAlert(
-            `✅ Left ${{riskLevel}} Risk Zone — Safe: ${{z.area}}`,
-            `✅ <b>Left ${{riskLevel}} Risk Zone — Safe</b> &nbsp;›&nbsp; ${{z.area}}`,
-            'left'
-          );
+          addAlert(`✅ <b>Left Risk Zone — Safe</b> &nbsp;›&nbsp; ${{z.area}}`, 'af-left');
         }} else if (prev === 'approaching') {{
           zoneState[z.id] = null;
         }}
@@ -460,7 +410,7 @@ if (SHOW_CAR && PATHS.length > 0) {{
         html: `<span style="font-size:22px;line-height:1;display:block;">🏁</span>`,
         iconSize:[24,24], iconAnchor:[12,12]
       }}));
-      addAlert('🏁 Destination reached!', '🏁 <b>Simulation complete — Destination reached safely!</b>', 'safe');
+      addAlert('🏁 <b>Simulation complete — Destination reached safely!</b>', 'af-safe');
       return;
     }}
 
@@ -469,7 +419,7 @@ if (SHOW_CAR && PATHS.length > 0) {{
       pathIdx++;
       ptIdx = 0;
       if (pathIdx < PATHS.length)
-        addAlert(`🟢 Path #${{PATHS[pathIdx].id}}`, `🟢 <b>Continuing to Path #${{PATHS[pathIdx].id}}</b>`, 'safe');
+        addAlert(`🟢 <b>Continuing to Path #${{PATHS[pathIdx].id}}</b>`, 'af-safe');
       setTimeout(step, BASE_DELAY);
       return;
     }}
@@ -494,7 +444,7 @@ if (SHOW_CAR && PATHS.length > 0) {{
 
   // Zoom to start of path before beginning
   map.setView(PATHS[0].coords[0], 14);
-  addAlert(`🟢 Simulation started`, `🟢 <b>Simulation started — Path #${{PATHS[0].id}} | ${{totalPts}} steps | ~30s journey</b>`, 'safe');
+  addAlert(`🟢 <b>Simulation started — Path #${{PATHS[0].id}} | ${{totalPts}} steps | ~30s journey</b>`, 'af-safe');
   setTimeout(step, 500); // small delay so map settles before car moves
 }}
 </script>
@@ -516,49 +466,45 @@ def alert_box(level: str, text: str):
 # 8. MAIN APPLICATION LOGIC
 # ─────────────────────────────────────────────
 def main():
-    # ── Session state init — must be FIRST, before any widget ──
-    if "running" not in st.session_state:
-        st.session_state.running = False
-
-    # ── Sidebar — widgets only, NO rerun inside ──
+    # ── Sidebar ──────────────────────────────
     with st.sidebar:
         st.image("https://img.icons8.com/color/96/traffic-jam.png", width=56)
         st.title("Road Risk Navigator")
         st.caption("Powered by Supabase + Leaflet")
         st.divider()
 
-        st.subheader("\U0001f3ae Session Controls")
+        st.subheader("🎮 Session Controls")
         col1, col2 = st.columns(2)
         with col1:
-            start_btn = st.button("\u25b6 Start", use_container_width=True, type="primary")
+            start_btn = st.button("▶ Start", use_container_width=True, type="primary")
         with col2:
-            stop_btn  = st.button("\u23f9 Stop",  use_container_width=True)
+            stop_btn  = st.button("⏹ Stop",  use_container_width=True)
+        if st.button("🔄 Run / Refresh", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
 
-        if st.session_state.running:
-            st.success("\U0001f7e2 Car simulation active on map.")
-        else:
-            st.info("\u23f8 Press Start to begin.")
+        if "running" not in st.session_state:
+            st.session_state.running = False
+        if start_btn:
+            st.session_state.running = True
+            st.success("Session started! Car simulation active on map.")
+        if stop_btn:
+            st.session_state.running = False
+            st.warning("Session stopped.")
 
         st.divider()
 
-        st.subheader("\U0001f4cd Location Search")
+        st.subheader("📍 Location Search")
         address_input = st.text_input("Search address / place", placeholder="e.g. Andheri, Mumbai")
-        search_btn    = st.button("\U0001f50d Find & Check Risk", use_container_width=True)
+        search_btn    = st.button("🔍 Find & Check Risk", use_container_width=True)
 
         st.divider()
 
-        st.subheader("\U0001f527 Filters & Settings")
+        st.subheader("🔧 Filters & Settings")
         risk_filter = st.multiselect("Risk Level", ["High", "Medium", "Low"], default=["High", "Medium", "Low"])
+        radius_m    = st.slider("Search Alert Radius (m)", 100, 2000, 500, step=100)
         show_paths  = st.checkbox("Show Driver Paths", value=True)
         show_zones  = st.checkbox("Show Accident Zones", value=True)
-
-    # ── Button logic OUTSIDE sidebar — st.rerun() is reliable here ──
-    if start_btn:
-        st.session_state.running = True
-        st.rerun()
-    if stop_btn:
-        st.session_state.running = False
-        st.rerun()
 
     # ── Load Data ────────────────────────────
     accident_df  = load_accident_data()
@@ -584,7 +530,7 @@ def main():
         coords = geocode_location(address_input)
         if coords:
             highlight_point = coords
-            risk_info = check_risk_at_point(coords[0], coords[1], accident_df, 500)
+            risk_info = check_risk_at_point(coords[0], coords[1], accident_df, radius_m)
             st.subheader("📊 Risk Assessment")
             alert_box(risk_info["level"], risk_info["message"])
             if risk_info["zones"]:
@@ -622,6 +568,9 @@ def main():
             use_container_width=True, hide_index=True
         )
 
+    with st.expander("🛣️ Driver Path Data", expanded=False):
+        for p in driver_paths:
+            st.write(f"**Path #{p['id']}** — {len(p['coordinates'])} coordinate points | {p.get('created_at','')}")
 
     # ── Footer ────────────────────────────────
     st.markdown("""
