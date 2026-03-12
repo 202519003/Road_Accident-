@@ -50,24 +50,24 @@ st.markdown("""
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
-@st.cache_resource(show_spinner="Connecting to Supabase…")
 def get_db_connection():
-    conn = psycopg2.connect(
-        host     = st.secrets.get("DB_HOST", "aws-1-ap-south-1.pooler.supabase.com"),
-        port     = int(st.secrets.get("DB_PORT", 5432)),
-        dbname   = st.secrets.get("DB_NAME", "postgres"),
-        user     = st.secrets.get("DB_USER", "postgres.ourldbbwnndtymlznzlo"),
-        password = st.secrets.get("DB_PASSWORD", ""),  # never hardcode
+    return psycopg2.connect(
+        host     = st.secrets["DB_HOST"],
+        port     = int(st.secrets["DB_PORT"]),
+        dbname   = st.secrets["DB_NAME"],
+        user     = st.secrets["DB_USER"],
+        password = st.secrets["DB_PASSWORD"],
         sslmode  = "require"
     )
-    return conn
 
 
 @st.cache_data(ttl=300, show_spinner="Loading accident zones…")
-def load_accident_data(_conn) -> pd.DataFrame:
-    with _conn.cursor(cursor_factory=RealDictCursor) as cur:
+def load_accident_data() -> pd.DataFrame:
+    conn = get_db_connection()
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute("SELECT * FROM accident_data1;")
         rows = cur.fetchall()
+    conn.close()
     df = pd.DataFrame(rows)
     df["latitude"]        = pd.to_numeric(df["latitude"],        errors="coerce")
     df["longitude"]       = pd.to_numeric(df["longitude"],       errors="coerce")
@@ -79,10 +79,12 @@ def load_accident_data(_conn) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=300, show_spinner="Loading driver path…")
-def load_driver_path(_conn) -> list[dict]:
-    with _conn.cursor(cursor_factory=RealDictCursor) as cur:
+def load_driver_path() -> list[dict]:
+    conn = get_db_connection()
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute("SELECT * FROM driver_path;")
         rows = cur.fetchall()
+    conn.close()
     all_paths = []
     for row in rows:
         coords = decode_wkb_linestring(row.get("geom", ""))
@@ -425,9 +427,8 @@ def main():
         show_zones  = st.checkbox("Show Accident Zones", value=True)
 
     # ── Load Data ────────────────────────────
-    conn         = get_db_connection()    # connects via psycopg2
-    accident_df  = load_accident_data(conn)
-    driver_paths = load_driver_path(conn)
+    accident_df  = load_accident_data()
+    driver_paths = load_driver_path()
 
     # Apply risk filter
     if risk_filter:
@@ -557,5 +558,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
