@@ -406,25 +406,43 @@ if (SHOW_CAR && PATHS.length > 0) {{
 
   function checkZones(lat, lng) {{
     ZONES.forEach(z => {{
-      const dist = haversineM(lat, lng, z.lat, z.lng);
-      const prev = zoneState[z.id] || null;
+      const dist      = haversineM(lat, lng, z.lat, z.lng);
+      const prev      = zoneState[z.id] || null;
+      const riskLevel = z.risk ? z.risk.toUpperCase() : 'RISK';
+
       if (dist <= ENTER_R) {{
         if (prev !== 'entered') {{
           zoneState[z.id] = 'entered';
-          addAlert(`🚨 Entered: ${{z.area}}`, `🚨 <b>Entered Risk Zone</b> — ${{z.area}} | ${{z.loc}} | Severity ${{z.si.toFixed(1)}}`, 'entered');
+          addAlert(
+            `🚨 Entered ${{riskLevel}} Risk Zone: ${{z.area}}`,
+            `🚨 <b>Entered ${{riskLevel}} Risk Zone</b> — ${{z.area}} | ${{z.loc}} | Severity ${{z.si.toFixed(1)}}`,
+            'entered'
+          );
         }}
       }} else if (dist <= APPROACH_R) {{
         if (prev === 'entered') {{
           zoneState[z.id] = null;
-          addAlert(`✅ Left Zone: ${{z.area}}`, `✅ <b>Left Risk Zone — Safe</b> &nbsp;›&nbsp; ${{z.area}}`, 'left');
+          addAlert(
+            `✅ Left ${{riskLevel}} Risk Zone — Safe: ${{z.area}}`,
+            `✅ <b>Left ${{riskLevel}} Risk Zone — Safe</b> &nbsp;›&nbsp; ${{z.area}}`,
+            'left'
+          );
         }} else if (prev !== 'approaching') {{
           zoneState[z.id] = 'approaching';
-          addAlert(`⚠️ Approaching: ${{z.area}} (${{Math.round(dist)}}m)`, `⚠️ <b>Approaching Risk Zone</b> — ${{z.area}} | ${{z.loc}} | ${{Math.round(dist)}}m ahead`, 'approaching');
+          addAlert(
+            `⚠️ Approaching ${{riskLevel}} Risk Zone: ${{z.area}} (${{Math.round(dist)}}m)`,
+            `⚠️ <b>Approaching ${{riskLevel}} Risk Zone</b> — ${{z.area}} | ${{z.loc}} | ${{Math.round(dist)}}m ahead`,
+            'approaching'
+          );
         }}
       }} else {{
         if (prev === 'entered') {{
           zoneState[z.id] = null;
-          addAlert(`✅ Left Zone: ${{z.area}}`, `✅ <b>Left Risk Zone — Safe</b> &nbsp;›&nbsp; ${{z.area}}`, 'left');
+          addAlert(
+            `✅ Left ${{riskLevel}} Risk Zone — Safe: ${{z.area}}`,
+            `✅ <b>Left ${{riskLevel}} Risk Zone — Safe</b> &nbsp;›&nbsp; ${{z.area}}`,
+            'left'
+          );
         }} else if (prev === 'approaching') {{
           zoneState[z.id] = null;
         }}
@@ -506,23 +524,30 @@ def main():
         st.divider()
 
         st.subheader("🎮 Session Controls")
+        if "running" not in st.session_state:
+            st.session_state.running = False
+
         col1, col2 = st.columns(2)
         with col1:
             start_btn = st.button("▶ Start", use_container_width=True, type="primary")
         with col2:
             stop_btn  = st.button("⏹ Stop",  use_container_width=True)
-        if st.button("🔄 Run / Refresh", use_container_width=True):
-            st.cache_data.clear()
-            st.rerun()
+        refresh_btn = st.button("🔄 Run / Refresh", use_container_width=True)
 
-        if "running" not in st.session_state:
-            st.session_state.running = False
         if start_btn:
             st.session_state.running = True
-            st.success("Session started! Car simulation active on map.")
+            st.rerun()
         if stop_btn:
             st.session_state.running = False
-            st.warning("Session stopped.")
+            st.rerun()
+        if refresh_btn:
+            st.cache_data.clear()
+            st.rerun()
+        
+        if st.session_state.running:
+            st.success("🟢 Session active — car simulation running.")
+        else:
+            st.info("⏸ Session stopped.")
 
         st.divider()
 
@@ -534,7 +559,6 @@ def main():
 
         st.subheader("🔧 Filters & Settings")
         risk_filter = st.multiselect("Risk Level", ["High", "Medium", "Low"], default=["High", "Medium", "Low"])
-        radius_m    = st.slider("Search Alert Radius (m)", 100, 2000, 500, step=100)
         show_paths  = st.checkbox("Show Driver Paths", value=True)
         show_zones  = st.checkbox("Show Accident Zones", value=True)
 
@@ -562,7 +586,7 @@ def main():
         coords = geocode_location(address_input)
         if coords:
             highlight_point = coords
-            risk_info = check_risk_at_point(coords[0], coords[1], accident_df, radius_m)
+            risk_info = check_risk_at_point(coords[0], coords[1], accident_df, 500)
             st.subheader("📊 Risk Assessment")
             alert_box(risk_info["level"], risk_info["message"])
             if risk_info["zones"]:
