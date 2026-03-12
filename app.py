@@ -2,64 +2,53 @@ import streamlit as st
 import pandas as pd
 import folium
 from streamlit_folium import st_folium
-import time
 from math import radians, cos, sin, sqrt, atan2
+import time
 
 st.set_page_config(layout="wide")
 
 st.title("🚦 Road Accident Analysis and Alert System")
 
-# -----------------------------
+# -------------------------
 # Load Data
-# -----------------------------
+# -------------------------
 
 risk_data = pd.read_csv("data/export_123.csv")
 path_data = pd.read_csv("data/driver_path_points.csv")
 
-# -----------------------------
-# Route
-# -----------------------------
+route = path_data[["latitude","longitude"]].values.tolist()
 
-route = []
-
-for _, row in path_data.iterrows():
-    route.append([row["latitude"], row["longitude"]])
-
-# -----------------------------
-# Sidebar
-# -----------------------------
-
-st.sidebar.header("Route Control")
-
-speed = st.sidebar.slider("Simulation Speed",0.2,2.0,0.8)
-
-start = st.sidebar.button("Start Simulation")
-stop = st.sidebar.button("Stop Simulation")
-reset = st.sidebar.button("Reset")
-
-# -----------------------------
+# -------------------------
 # Session State
-# -----------------------------
-
-if "running" not in st.session_state:
-    st.session_state.running = False
+# -------------------------
 
 if "index" not in st.session_state:
     st.session_state.index = 0
 
-if start:
+if "running" not in st.session_state:
+    st.session_state.running = False
+
+# -------------------------
+# Sidebar
+# -------------------------
+
+st.sidebar.title("Simulation Control")
+
+speed = st.sidebar.slider("Simulation Speed",0.2,2.0,0.8)
+
+if st.sidebar.button("Start"):
     st.session_state.running = True
 
-if stop:
+if st.sidebar.button("Stop"):
     st.session_state.running = False
 
-if reset:
-    st.session_state.running = False
+if st.sidebar.button("Reset"):
     st.session_state.index = 0
+    st.session_state.running = False
 
-# -----------------------------
+# -------------------------
 # Distance Function
-# -----------------------------
+# -------------------------
 
 def distance(lat1,lon1,lat2,lon2):
 
@@ -78,46 +67,36 @@ def distance(lat1,lon1,lat2,lon2):
 
     return R*c
 
-# -----------------------------
-# Map Placeholder
-# -----------------------------
-
-map_placeholder = st.empty()
-alert_box = st.empty()
-
-# -----------------------------
+# -------------------------
 # Current Position
-# -----------------------------
+# -------------------------
 
-current_index = st.session_state.index
+index = st.session_state.index
 
-if current_index >= len(route):
-    current_index = len(route)-1
+if index >= len(route):
+    index = len(route)-1
 
-lat,lon = route[current_index]
+lat,lon = route[index]
 
-# -----------------------------
-# Build Map
-# -----------------------------
+# -------------------------
+# Create Map
+# -------------------------
 
 m = folium.Map(location=[lat,lon],zoom_start=12)
 
-# Draw route
+# route
 folium.PolyLine(route,color="blue",weight=5).add_to(m)
 
-# Accident Zones
+# accident zones
 for _,row in risk_data.iterrows():
 
     if row["risk_level"]=="High":
         color="red"
-
     elif row["risk_level"]=="Medium":
         color="orange"
-
     else:
         color="yellow"
 
-    # BUFFER ZONE (400m for all)
     folium.Circle(
         location=[row["latitude"],row["longitude"]],
         radius=400,
@@ -126,45 +105,27 @@ for _,row in risk_data.iterrows():
         fill_opacity=0.3
     ).add_to(m)
 
-    # STRONG CENTER POINT
+    # center point
     folium.CircleMarker(
         location=[row["latitude"],row["longitude"]],
-        radius=8,
+        radius=6,
         color="black",
         fill=True,
-        fill_color=color,
-        fill_opacity=1
+        fill_color=color
     ).add_to(m)
 
-    # ALERT CHECK
-    d = distance(lat,lon,row["latitude"],row["longitude"])
-
-    if d < 400 and d > 200:
-        alert_box.warning(f"⚠ Approaching {row['risk_level']} risk zone")
-
-    elif d <= 200:
-        alert_box.error(f"🚨 ENTERED {row['risk_level']} RISK ZONE")
-
-# -----------------------------
-# Car Marker
-# -----------------------------
-
+# car marker
 folium.Marker(
     [lat,lon],
     icon=folium.Icon(color="blue",icon="car"),
     tooltip="Driver"
 ).add_to(m)
 
-# -----------------------------
-# Show Map
-# -----------------------------
+st_folium(m,width=1200,height=650)
 
-with map_placeholder:
-    st_folium(m,width=1200,height=650)
-
-# -----------------------------
-# Simulation
-# -----------------------------
+# -------------------------
+# Simulation Step
+# -------------------------
 
 if st.session_state.running:
 
@@ -172,5 +133,4 @@ if st.session_state.running:
 
     st.session_state.index += 1
 
-    if st.session_state.index >= len(route):
-        st.session_state.running = False
+    st.rerun()
