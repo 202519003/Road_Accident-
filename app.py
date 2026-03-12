@@ -181,47 +181,70 @@ def build_leaflet_map(accident_df: pd.DataFrame,
   #wrapper {{ display:flex; flex-direction:column; height:100vh; }}
   #map {{ flex:1; min-height:0; }}
 
+  /* ── Single alert bar (one message at a time) ── */
   #alertFeed {{
     background:#0d1117;
     border-top:2px solid #1e90ff33;
-    height:115px;
-    overflow-y:auto;
-    padding:6px 10px;
+    height:52px;
     display:flex;
-    flex-direction:column;
-    gap:3px;
+    align-items:center;
     flex-shrink:0;
+    padding:0 10px;
+    overflow:hidden;
   }}
-  .af-item {{
-    display:flex; align-items:center; gap:8px;
-    padding:5px 10px; border-radius:6px;
-    font-size:0.77rem; font-weight:500; color:#fff;
-    animation: slideIn 0.3s ease;
+  #alertMsg {{
+    width:100%;
+    padding:8px 14px;
+    border-radius:6px;
+    font-size:0.82rem;
+    font-weight:600;
+    color:#fff;
+    border-left:4px solid #00c853;
+    background:#0d2a0d;
+    white-space:nowrap;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    transition:background 0.25s, border-color 0.25s;
   }}
-  @keyframes slideIn {{ from{{opacity:0;transform:translateY(-5px)}} to{{opacity:1;transform:none}} }}
-  .af-approaching {{ background:#0d1f2d; border-left:3px solid #00e5ff; }}
-  .af-entered     {{ background:#2a0000; border-left:3px solid #d50000; }}
-  .af-left        {{ background:#0d2a0d; border-left:3px solid #00c853; }}
-  .af-safe        {{ background:#0d2a0d; border-left:3px solid #00c853; }}
+  #alertMsg.approaching {{ background:#0d1f2d; border-left-color:#00e5ff; }}
+  #alertMsg.entered     {{ background:#2a0000; border-left-color:#d50000; }}
+  #alertMsg.left        {{ background:#0d2a0d; border-left-color:#00c853; }}
+  #alertMsg.safe        {{ background:#0d2a0d; border-left-color:#00c853; }}
+
+  /* ── Floating map alert bubble ── */
+  #mapAlert {{
+    position:absolute;
+    top:14px; left:50%; transform:translateX(-50%);
+    z-index:1000;
+    padding:7px 22px;
+    border-radius:20px;
+    font-size:0.82rem;
+    font-weight:700;
+    color:#fff;
+    pointer-events:none;
+    opacity:0;
+    transition:opacity 0.3s;
+    white-space:nowrap;
+    box-shadow:0 2px 14px #0009;
+  }}
+  #mapAlert.show {{ opacity:1; }}
+  #mapAlert.ap  {{ background:rgba(0,60,100,0.93); border:1.5px solid #00e5ff; }}
+  #mapAlert.en  {{ background:rgba(100,0,0,0.95);  border:1.5px solid #ff3333; }}
+  #mapAlert.lft {{ background:rgba(0,70,20,0.93);  border:1.5px solid #00c853; }}
 
   .legend {{ background:rgba(14,17,23,0.92); color:#eee; padding:10px 14px;
              border-radius:8px; font-size:0.76rem; line-height:1.8; box-shadow:0 2px 10px #0006; }}
   .legend h4 {{ margin:0 0 5px; font-size:0.82rem; border-bottom:1px solid #333; padding-bottom:3px; }}
   .dot {{ width:11px; height:11px; border-radius:50%; display:inline-block; margin-right:5px; vertical-align:middle; }}
-
-  #speedBox {{
-    background:rgba(14,17,23,0.9); color:#eee;
-    padding:8px 12px; border-radius:8px; font-size:0.76rem;
-  }}
-  #speedBox label {{ display:block; margin-bottom:4px; color:#aaa; }}
-  #speedSlider {{ width:130px; accent-color:#1e90ff; }}
 </style>
 </head>
 <body>
 <div id="wrapper">
-  <div id="map"></div>
+  <div id="map">
+    <div id="mapAlert"></div>
+  </div>
   <div id="alertFeed">
-    <div class="af-item af-safe">🟢 &nbsp; Press <b>Start</b> in the sidebar to begin car simulation…</div>
+    <div id="alertMsg" class="safe">🟢 &nbsp; Press <b>Start</b> in the sidebar to begin car simulation…</div>
   </div>
 </div>
 
@@ -254,13 +277,22 @@ function haversineM(lat1,lng1,lat2,lng2) {{
         a=Math.sin(dLat/2)**2+Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLng/2)**2;
   return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
 }}
-function addAlert(msg, cls) {{
-  const feed = document.getElementById('alertFeed');
-  const div  = document.createElement('div');
-  div.className = 'af-item ' + cls;
-  div.innerHTML = msg;
-  feed.prepend(div);
-  while (feed.children.length > 30) feed.removeChild(feed.lastChild);
+let mapAlertTimer = null;
+
+function addAlert(shortMsg, fullMsg, cls) {{
+  // ── Bottom bar: replace current message ──
+  const bar = document.getElementById('alertMsg');
+  bar.className = cls;
+  bar.innerHTML = fullMsg;
+
+  // ── Map floating bubble: short message only ──
+  const bubble = document.getElementById('mapAlert');
+  bubble.className = 'show ' + (cls==='approaching'?'ap': cls==='entered'?'en':'lft');
+  bubble.textContent = shortMsg;
+  if (mapAlertTimer) clearTimeout(mapAlertTimer);
+  mapAlertTimer = setTimeout(() => {{
+    bubble.className = '';
+  }}, 4000);
 }}
 
 // ── ACCIDENT ZONES ────────────────────────────
@@ -379,20 +411,20 @@ if (SHOW_CAR && PATHS.length > 0) {{
       if (dist <= ENTER_R) {{
         if (prev !== 'entered') {{
           zoneState[z.id] = 'entered';
-          addAlert(`🚨 <b>Entered Risk Zone</b> — ${{z.area}} | ${{z.loc}} | Severity ${{z.si.toFixed(1)}}`, 'af-entered');
+          addAlert(`🚨 Entered: ${{z.area}}`, `🚨 <b>Entered Risk Zone</b> — ${{z.area}} | ${{z.loc}} | Severity ${{z.si.toFixed(1)}}`, 'entered');
         }}
       }} else if (dist <= APPROACH_R) {{
         if (prev === 'entered') {{
           zoneState[z.id] = null;
-          addAlert(`✅ <b>Left Risk Zone — Safe</b> &nbsp;›&nbsp; ${{z.area}}`, 'af-left');
+          addAlert(`✅ Left Zone: ${{z.area}}`, `✅ <b>Left Risk Zone — Safe</b> &nbsp;›&nbsp; ${{z.area}}`, 'left');
         }} else if (prev !== 'approaching') {{
           zoneState[z.id] = 'approaching';
-          addAlert(`⚠️ <b>Approaching Risk Zone</b> — ${{z.area}} | ${{z.loc}} | ${{Math.round(dist)}}m ahead`, 'af-approaching');
+          addAlert(`⚠️ Approaching: ${{z.area}} (${{Math.round(dist)}}m)`, `⚠️ <b>Approaching Risk Zone</b> — ${{z.area}} | ${{z.loc}} | ${{Math.round(dist)}}m ahead`, 'approaching');
         }}
       }} else {{
         if (prev === 'entered') {{
           zoneState[z.id] = null;
-          addAlert(`✅ <b>Left Risk Zone — Safe</b> &nbsp;›&nbsp; ${{z.area}}`, 'af-left');
+          addAlert(`✅ Left Zone: ${{z.area}}`, `✅ <b>Left Risk Zone — Safe</b> &nbsp;›&nbsp; ${{z.area}}`, 'left');
         }} else if (prev === 'approaching') {{
           zoneState[z.id] = null;
         }}
@@ -410,7 +442,7 @@ if (SHOW_CAR && PATHS.length > 0) {{
         html: `<span style="font-size:22px;line-height:1;display:block;">🏁</span>`,
         iconSize:[24,24], iconAnchor:[12,12]
       }}));
-      addAlert('🏁 <b>Simulation complete — Destination reached safely!</b>', 'af-safe');
+      addAlert('🏁 Destination reached!', '🏁 <b>Simulation complete — Destination reached safely!</b>', 'safe');
       return;
     }}
 
@@ -419,7 +451,7 @@ if (SHOW_CAR && PATHS.length > 0) {{
       pathIdx++;
       ptIdx = 0;
       if (pathIdx < PATHS.length)
-        addAlert(`🟢 <b>Continuing to Path #${{PATHS[pathIdx].id}}</b>`, 'af-safe');
+        addAlert(`🟢 Path #${{PATHS[pathIdx].id}}`, `🟢 <b>Continuing to Path #${{PATHS[pathIdx].id}}</b>`, 'safe');
       setTimeout(step, BASE_DELAY);
       return;
     }}
@@ -444,7 +476,7 @@ if (SHOW_CAR && PATHS.length > 0) {{
 
   // Zoom to start of path before beginning
   map.setView(PATHS[0].coords[0], 14);
-  addAlert(`🟢 <b>Simulation started — Path #${{PATHS[0].id}} | ${{totalPts}} steps | ~30s journey</b>`, 'af-safe');
+  addAlert(`🟢 Simulation started`, `🟢 <b>Simulation started — Path #${{PATHS[0].id}} | ${{totalPts}} steps | ~30s journey</b>`, 'safe');
   setTimeout(step, 500); // small delay so map settles before car moves
 }}
 </script>
