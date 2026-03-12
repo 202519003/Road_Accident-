@@ -66,7 +66,7 @@ def get_db_connection():
 @st.cache_data(ttl=300, show_spinner="Loading accident zones…")
 def load_accident_data(_conn) -> pd.DataFrame:
     with _conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("SELECT * FROM export_123;")
+        cur.execute("SELECT * FROM accident_data1;")
         rows = cur.fetchall()
     df = pd.DataFrame(rows)
     df["latitude"]        = pd.to_numeric(df["latitude"],        errors="coerce")
@@ -81,7 +81,7 @@ def load_accident_data(_conn) -> pd.DataFrame:
 @st.cache_data(ttl=300, show_spinner="Loading driver path…")
 def load_driver_path(_conn) -> list[dict]:
     with _conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("SELECT * FROM export_Driver_path;")
+        cur.execute("SELECT * FROM driver_path;")
         rows = cur.fetchall()
     all_paths = []
     for row in rows:
@@ -557,4 +557,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
