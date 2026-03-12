@@ -516,51 +516,53 @@ def alert_box(level: str, text: str):
 # 8. MAIN APPLICATION LOGIC
 # ─────────────────────────────────────────────
 def main():
-    # ── Sidebar ──────────────────────────────
+    # ── Session state init — must be FIRST, before any widget ──
+    if "running" not in st.session_state:
+        st.session_state.running = False
+
+    # ── Sidebar — widgets only, NO rerun inside ──
     with st.sidebar:
         st.image("https://img.icons8.com/color/96/traffic-jam.png", width=56)
         st.title("Road Risk Navigator")
         st.caption("Powered by Supabase + Leaflet")
         st.divider()
 
-        st.subheader("🎮 Session Controls")
-        if "running" not in st.session_state:
-            st.session_state.running = False
-
+        st.subheader("\U0001f3ae Session Controls")
         col1, col2 = st.columns(2)
         with col1:
-            start_btn = st.button("▶ Start", use_container_width=True, type="primary")
+            start_btn = st.button("\u25b6 Start", use_container_width=True, type="primary")
         with col2:
-            stop_btn  = st.button("⏹ Stop",  use_container_width=True)
-        refresh_btn = st.button("🔄 Run / Refresh", use_container_width=True)
+            stop_btn  = st.button("\u23f9 Stop",  use_container_width=True)
+        refresh_btn = st.button("\U0001f504 Run / Refresh", use_container_width=True)
 
-        if start_btn:
-            st.session_state.running = True
-            st.rerun()
-        if stop_btn:
-            st.session_state.running = False
-            st.rerun()
-        if refresh_btn:
-            st.cache_data.clear()
-            st.rerun()
-        
         if st.session_state.running:
-            st.success("🟢 Session active — car simulation running.")
+            st.success("\U0001f7e2 Car simulation active on map.")
         else:
-            st.info("⏸ Session stopped.")
+            st.info("\u23f8 Press Start to begin.")
 
         st.divider()
 
-        st.subheader("📍 Location Search")
+        st.subheader("\U0001f4cd Location Search")
         address_input = st.text_input("Search address / place", placeholder="e.g. Andheri, Mumbai")
-        search_btn    = st.button("🔍 Find & Check Risk", use_container_width=True)
+        search_btn    = st.button("\U0001f50d Find & Check Risk", use_container_width=True)
 
         st.divider()
 
-        st.subheader("🔧 Filters & Settings")
+        st.subheader("\U0001f527 Filters & Settings")
         risk_filter = st.multiselect("Risk Level", ["High", "Medium", "Low"], default=["High", "Medium", "Low"])
         show_paths  = st.checkbox("Show Driver Paths", value=True)
         show_zones  = st.checkbox("Show Accident Zones", value=True)
+
+    # ── Button logic OUTSIDE sidebar — st.rerun() is reliable here ──
+    if start_btn:
+        st.session_state.running = True
+        st.rerun()
+    if stop_btn:
+        st.session_state.running = False
+        st.rerun()
+    if refresh_btn:
+        st.cache_data.clear()
+        st.rerun()
 
     # ── Load Data ────────────────────────────
     accident_df  = load_accident_data()
