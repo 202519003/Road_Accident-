@@ -77,9 +77,9 @@ def load_driver_path() -> list:
         coords = decode_wkb_linestring(str(row.get("geom", "")))
         if coords:
             all_paths.append({
-                "id": row.get("id"),
-                "created_at": str(row.get("created_at", "")),
-                "coordinates": coords
+                "id":          row.get("id"),
+                "created_at":  str(row.get("created_at", "")),
+                "coordinates": coords,
             })
     return all_paths
 
@@ -104,19 +104,34 @@ def decode_wkb_linestring(hex_wkb: str) -> list:
         return []
 
 # ─────────────────────────────────────────────
-# 4. GEOCODER
-# ─────────────────────────────────────────────
-@st.cache_data(ttl=600, show_spinner="Geocoding location...")
-def geocode_location(address: str):
+import re
+
+@st.cache_data(ttl=600, show_spinner="Geocoding...")
+def _nominatim(address: str):
     try:
-        geolocator = Nominatim(user_agent="road_risk_navigator_v2", timeout=10)
-        result = geolocator.geocode(address)
-        if result:
-            return result.latitude, result.longitude
+        geo = Nominatim(user_agent="road_risk_nav_v6", timeout=10)
+        r   = geo.geocode(address)
+        return (r.latitude, r.longitude, str(r.address[:70])) if r else None
+    except Exception:
         return None
-    except Exception as e:
-        st.warning(f"Geocoding error: {e}")
-        return None
+
+def resolve_location(query: str, accident_df: pd.DataFrame):
+    q = query.strip()
+    m = re.match(r'^([+-]?\d{1,3}(?:\.\d+)?)\s*[,\s]\s*([+-]?\d{1,3}(?:\.\d+)?)$', q)
+    if m:
+        la,ln = float(m.group(1)),float(m.group(2))
+        if -90<=la<=90 and -180<=ln<=180:
+            return la, ln, f"{la:.5f}, {ln:.5f}"
+    ql = q.lower()
+    for _, row in accident_df.iterrows():
+        area = str(row.get("area","")).lower().strip()
+        # Exact match: query must equal the area field exactly (case-insensitive)
+        # This prevents "Andheri" from matching rows where area="Pantnagar"
+        # just because location contains "Andheri Link Rd"
+        if ql == area:
+            return float(row["latitude"]), float(row["longitude"]), \
+                   f"{row.get('area','')} — {row.get('location','')}"
+    return _nominatim(q)
 
 # ─────────────────────────────────────────────
 # 5. RISK CHECK FUNCTIONS
@@ -146,27 +161,22 @@ def build_leaflet_map(accident_df: pd.DataFrame,
                        driver_paths: list,
                        center_lat: float = 19.076,
                        center_lng: float = 72.877,
-                       highlight_point=None,
-                       show_car: bool = True) -> str:
+                       search_zones: list = None,
+                       search_label: str = "",
+                       show_car: bool = False) -> str:
 
-    zones_js = json.dumps([
-        {
-            "id":   int(r["id"]),
-            "lat":  float(r["latitude"]),
-            "lng":  float(r["longitude"]),
-            "area": str(r.get("area", "")),
-            "loc":  str(r.get("location", "")),
-            "si":   float(r.get("severity_index", 0)),
-            "risk": str(r.get("risk_level", "Low")),
-            "ta":   int(r.get("total_accident", 0)),
-            "tf":   int(r.get("total_fatality", 0)),
-        }
-        for _, r in accident_df.iterrows()
+    zones_js    = json.dumps([
+        {"id":int(r["id"]),"lat":float(r["latitude"]),"lng":float(r["longitude"]),
+         "area":str(r.get("area","")),"loc":str(r.get("location","")),"city":str(r.get("city","")),
+         "si":float(r.get("severity_index",0)),"risk":str(r.get("risk_level","Low")),
+         "ta":int(r.get("total_accident",0)),"tf":int(r.get("total_fatality",0))}
+        for _,r in accident_df.iterrows()
     ])
-
-    paths_js     = json.dumps([{"id": p["id"], "coords": p["coordinates"]} for p in driver_paths])
-    highlight_js = json.dumps(list(highlight_point) if highlight_point else None)
-    show_car_js  = "true" if show_car else "false"
+    paths_js    = json.dumps([{"id":p["id"],"coords":p["coordinates"]} for p in driver_paths])
+    sz_ids_js   = json.dumps([z["id"]  for z in search_zones] if search_zones else [])
+    sz_data_js  = json.dumps(search_zones if search_zones else [])
+    sz_label_js = json.dumps(search_label)
+    show_car_js = "true" if show_car else "false"
 
     html = f"""<!DOCTYPE html>
 <html>
@@ -236,12 +246,40 @@ def build_leaflet_map(accident_df: pd.DataFrame,
              border-radius:8px; font-size:0.76rem; line-height:1.8; box-shadow:0 2px 10px #0006; }}
   .legend h4 {{ margin:0 0 5px; font-size:0.82rem; border-bottom:1px solid #333; padding-bottom:3px; }}
   .dot {{ width:11px; height:11px; border-radius:50%; display:inline-block; margin-right:5px; vertical-align:middle; }}
+
+  /* search result panel */
+  #srPanel{{position:absolute;bottom:62px;left:12px;z-index:1002;width:300px;max-height:380px;
+            background:rgba(10,13,20,0.97);border:1px solid #2c3a5a;border-radius:12px;
+            box-shadow:0 6px 30px #000d;overflow:hidden;display:none;flex-direction:column;}}
+  #srPanel.open{{display:flex;animation:fadeUp 0.25s ease;}}
+  #srHead{{padding:10px 14px 8px;background:rgba(22,32,55,0.99);border-bottom:1px solid #1e2c44;
+           display:flex;align-items:center;justify-content:space-between;flex-shrink:0;}}
+  #srHead h3{{margin:0;font-size:0.88rem;color:#e2e8f0;font-weight:700;}}
+  #srClose{{background:none;border:none;color:#556;font-size:1.1rem;cursor:pointer;padding:0 2px;}}
+  #srClose:hover{{color:#ccc;}}
+  #srScroll{{overflow-y:auto;max-height:310px;}}
+  .sr-row{{padding:9px 14px;border-bottom:1px solid #131b2c;font-size:0.78rem;color:#cdd;}}
+  .sr-row:last-child{{border-bottom:none;}}
+  .sr-name{{font-size:0.85rem;font-weight:700;margin-bottom:1px;}}
+  .sr-sub{{color:#7a8fa8;font-size:0.72rem;margin-bottom:4px;}}
+  .sr-badge{{display:inline-block;padding:1px 8px;border-radius:8px;font-size:0.69rem;font-weight:800;margin-right:4px;}}
+  .sr-stats{{font-size:0.74rem;color:#9ab;margin-top:3px;}}
+  .sr-stats b{{color:#cde;}}
+  @keyframes fadeUp{{from{{opacity:0;transform:translateY(8px);}}to{{opacity:1;transform:translateY(0);}}}}
+  @keyframes pulse{{0%,100%{{transform:scale(1);opacity:1;}}50%{{transform:scale(1.6);opacity:0.6;}}}}
 </style>
 </head>
 <body>
 <div id="wrapper">
   <div id="map">
     <div id="mapAlert"></div>
+    <div id="srPanel">
+      <div id="srHead">
+        <h3 id="srTitle">📍 Search Results</h3>
+        <button id="srClose" onclick="closeSR()">✕</button>
+      </div>
+      <div id="srScroll"><div id="srBody"></div></div>
+    </div>
   </div>
   <div id="alertFeed">
     <div id="alertMsg" class="safe">🟢 &nbsp; Press <b>Start</b> in the sidebar to begin car simulation…</div>
@@ -249,26 +287,39 @@ def build_leaflet_map(accident_df: pd.DataFrame,
 </div>
 
 <script>
-const ZONES    = {zones_js};
-const PATHS    = {paths_js};
-const HLIGHT   = {highlight_js};
-const SHOW_CAR = {show_car_js};
+const ZONES     = {zones_js};
+const PATHS     = {paths_js};
+const SZ_IDS    = new Set({sz_ids_js});
+const SZ_DATA   = {sz_data_js};
+const SZ_LABEL  = {sz_label_js};
+const SHOW_CAR  = {show_car_js};
 const APPROACH_R = 500;
 const ENTER_R    = 120;
+const HAS_SEARCH = SZ_IDS.size > 0;
+const LS_IDX    = 'riskmap_car_idx';
+const LS_TRAIL  = 'riskmap_trail';
 
 // ── MAP INIT ─────────────────────────────────
 // preferCanvas MUST be false — it breaks divIcon (causes ghost/duplicate car)
 const map = L.map('map', {{zoomControl:true, preferCanvas:false}})
               .setView([{center_lat}, {center_lng}], 13);
-L.tileLayer('https://{{s}}.basemaps.cartocdn.com/dark_all/{{z}}/{{x}}/{{y}}{{r}}.png', {{
-  attribution:'© OpenStreetMap © CartoDB', subdomains:'abcd', maxZoom:19
-}}).addTo(map);
+// ── 5 BASE LAYERS + localStorage persistence ──
+const BL = {{
+  dark     : L.tileLayer('https://{{s}}.basemaps.cartocdn.com/dark_all/{{z}}/{{x}}/{{y}}{{r}}.png',   {{attribution:'&copy; OSM &copy; CartoDB',subdomains:'abcd',maxZoom:19}}),
+  light    : L.tileLayer('https://{{s}}.basemaps.cartocdn.com/light_all/{{z}}/{{x}}/{{y}}{{r}}.png',  {{attribution:'&copy; OSM &copy; CartoDB',subdomains:'abcd',maxZoom:19}}),
+  street   : L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png',                {{attribution:'&copy; OpenStreetMap contributors',maxZoom:19}}),
+  satellite: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{{z}}/{{y}}/{{x}}',{{attribution:'&copy; Esri',maxZoom:19}}),
+  topo     : L.tileLayer('https://{{s}}.tile.opentopomap.org/{{z}}/{{x}}/{{y}}.png',                  {{attribution:'&copy; OSM &copy; OpenTopoMap',subdomains:'abc',maxZoom:17}}),
+}};
+BL[localStorage.getItem('riskmap_bl')||'dark'].addTo(map);
 
 // ── HELPERS ──────────────────────────────────
-function siColor(si) {{
-  if (si > 25) return '#d50000';
-  if (si > 10) return '#ff6d00';
-  return '#ffd600';
+// Use actual DB risk_level field for colors — matches what the table shows
+function riskColor(risk) {{
+  const r = (risk||'').toLowerCase();
+  if (r === 'high')   return '#d50000';
+  if (r === 'medium') return '#ff6d00';
+  return '#ffd600';  // low or unknown
 }}
 function haversineM(lat1,lng1,lat2,lng2) {{
   const R=6371000,
@@ -295,73 +346,112 @@ function addAlert(shortMsg, fullMsg, cls) {{
   }}, 4000);
 }}
 
+
+// ── SEARCH RESULT PANEL ───────────────────────
+function openSR(){{
+  document.getElementById('srTitle').textContent=SZ_LABEL||'Search Results';
+  let html='';
+  SZ_DATA.forEach(z=>{{
+    const col=riskColor(z.risk),lv=z.risk.toUpperCase();
+    const bg=lv==='HIGH'?'rgba(213,0,0,0.15)':lv==='MEDIUM'?'rgba(255,109,0,0.15)':'rgba(255,214,0,0.12)';
+    html+=`<div class="sr-row">
+      <div class="sr-name" style="color:${{col}}">🚨 ${{z.area}}</div>
+      <div class="sr-sub">${{z.loc}}</div>
+      <span class="sr-badge" style="background:${{bg}};color:${{col}};border:1px solid ${{col}}55">${{lv}} RISK</span>
+      <div class="sr-stats">
+        Severity: <b style="color:${{col}}">${{z.si.toFixed(1)}}</b>
+        &nbsp;·&nbsp; Accidents: <b>${{z.ta}}</b>
+        &nbsp;·&nbsp; Fatalities: <b>${{z.tf}}</b>
+      </div>
+    </div>`;
+  }});
+  if(!html)html='<div style="padding:12px 14px;color:#778;font-size:0.8rem">No matching zones found.</div>';
+  document.getElementById('srBody').innerHTML=html;
+  document.getElementById('srPanel').className='open';
+}}
+function closeSR(){{document.getElementById('srPanel').className='';}}
+
 // ── ACCIDENT ZONES ────────────────────────────
-const zoneLayer = L.layerGroup().addTo(map);
-ZONES.forEach(z => {{
-  const col = siColor(z.si);
-  // Outer approach ring
-  L.circle([z.lat,z.lng], {{
-    radius:APPROACH_R, color:col, fillColor:col,
-    fillOpacity:0.10, weight:1.5, dashArray:'6 4'
-  }}).addTo(map);
-  // Inner entered ring
-  L.circle([z.lat,z.lng], {{
-    radius:ENTER_R, color:col, fillColor:col,
-    fillOpacity:0.28, weight:2
-  }}).addTo(map);
-  // Marker
-  L.marker([z.lat,z.lng], {{
-    icon: L.divIcon({{
-      className:'',
-      html:`<div style="width:13px;height:13px;border-radius:50%;background:${{col}};
-                 border:2px solid #fff;box-shadow:0 0 7px ${{col}}99"></div>`,
-      iconSize:[13,13], iconAnchor:[6,6]
-    }})
-  }}).bindPopup(`
-    <b>🚨 ${{z.area}}</b><br><small>${{z.loc}}</small>
-    <hr style="margin:4px 0">
-    Severity: <b>${{z.si.toFixed(1)}}</b> | Risk: <b style="color:${{col}}">${{z.risk}}</b><br>
-    Accidents: <b>${{z.ta}}</b> | Fatalities: <b>${{z.tf}}</b>
-  `,{{maxWidth:220}}).addTo(zoneLayer);
+const zoneLayer=L.layerGroup().addTo(map);
+ZONES.forEach(z=>{{
+  const col=riskColor(z.risk);
+  const isMatch=!HAS_SEARCH||SZ_IDS.has(z.id);
+  const dimmed=HAS_SEARCH&&!isMatch;
+  const sz=isMatch&&HAS_SEARCH?16:13;
+  const pulse=isMatch&&HAS_SEARCH
+    ?`animation:pulse 1.2s ease-in-out infinite;box-shadow:0 0 20px ${{col}};`
+    :`box-shadow:0 0 7px ${{col}}99;`;
+
+  L.circle([z.lat,z.lng],{{radius:APPROACH_R,color:col,fillColor:col,
+    fillOpacity:dimmed?0.01:0.10,weight:dimmed?0.3:1.5,opacity:dimmed?0.10:1,dashArray:'6 4'}}).addTo(map);
+  L.circle([z.lat,z.lng],{{radius:ENTER_R,color:col,fillColor:col,
+    fillOpacity:dimmed?0.02:0.28,weight:dimmed?0.3:2,opacity:dimmed?0.10:1}}).addTo(map);
+  L.marker([z.lat,z.lng],{{icon:L.divIcon({{
+    className:'',
+    html:`<div style="width:${{sz}}px;height:${{sz}}px;border-radius:50%;
+              background:${{col}};border:2px solid #fff;
+              opacity:${{dimmed?0.07:1}};${{pulse}}"></div>`,
+    iconSize:[sz,sz],iconAnchor:[sz/2,sz/2]
+  }})}})
+  .bindPopup(`
+    <b style="color:${{col}}">🚨 ${{z.area}}</b><br>
+    <small style="color:#aaa">${{z.loc}}</small>
+    <hr style="margin:5px 0;border-color:#333">
+    <table style="font-size:0.8rem;width:100%;border-collapse:collapse">
+      <tr><td style="color:#888;padding:2px 4px">Risk Level</td><td><b style="color:${{col}}">${{z.risk}}</b></td></tr>
+      <tr><td style="color:#888;padding:2px 4px">Severity</td><td><b style="color:${{col}}">${{z.si.toFixed(1)}}</b></td></tr>
+      <tr><td style="color:#888;padding:2px 4px">Accidents</td><td><b>${{z.ta}}</b></td></tr>
+      <tr><td style="color:#888;padding:2px 4px">Fatalities</td><td><b>${{z.tf}}</b></td></tr>
+    </table>`,{{maxWidth:240}})
+  .addTo(zoneLayer);
 }});
+
 
 // ── DRIVER PATHS ──────────────────────────────
 const pathLayer = L.layerGroup().addTo(map);
 const PATH_COLORS = ['#00e5ff','#69ff47','#ff4081','#e040fb','#ffab40'];
-PATHS.forEach((p,i) => {{
+PATHS.forEach(function(p,i) {{
   if (!p.coords || p.coords.length < 2) return;
-  const col = PATH_COLORS[i % PATH_COLORS.length];
-  // Draw path line (dashed guide)
-  L.polyline(p.coords, {{color:col, weight:4, opacity:0.55, dashArray:'8 5'}})
-   .bindPopup(`<b>Driver Path #${{p.id}}</b> — ${{p.coords.length}} points`)
+  var col = PATH_COLORS[i % PATH_COLORS.length];
+  L.polyline(p.coords, {{color:col, weight:4, opacity:0.65, dashArray:'8 5'}})
+   .bindPopup('<b>Driver Path #'+p.id+'</b> — '+p.coords.length+' points')
    .addTo(pathLayer);
-  // End marker only (start is where car begins — no dot there to avoid duplicate)
-  L.circleMarker(p.coords[p.coords.length-1], {{
-    radius:7, color:'#d50000', fillColor:'#d50000', fillOpacity:1, weight:2
-  }}).bindTooltip('🔴 Destination').addTo(pathLayer);
+  L.circleMarker(p.coords[0], {{radius:7,color:'#00c853',fillColor:'#00c853',fillOpacity:1,weight:2}})
+   .bindTooltip('🟢 Start').addTo(pathLayer);
+  L.circleMarker(p.coords[p.coords.length-1], {{radius:7,color:'#d50000',fillColor:'#d50000',fillOpacity:1,weight:2}})
+   .bindTooltip('🔴 Destination').addTo(pathLayer);
 }});
 
-// ── SEARCHED LOCATION ────────────────────────
-if (HLIGHT) {{
-  L.marker(HLIGHT, {{icon:L.divIcon({{className:'',
-    html:`<div style="background:#00e5ff;width:18px;height:18px;border-radius:50%;
-               border:3px solid #fff;box-shadow:0 0 14px #00e5ff"></div>`,
-    iconSize:[18,18],iconAnchor:[9,9]}})
-  }}).bindPopup('<b>📍 Searched Location</b>').addTo(map).openPopup();
-  map.setView(HLIGHT, 14);
+// ── SEARCH: zoom to matched zones + open panel ────────────────────
+if(HAS_SEARCH){{
+  const mz=ZONES.filter(z=>SZ_IDS.has(z.id));
+  if(mz.length>0){{
+    const lats=mz.map(z=>z.lat),lngs=mz.map(z=>z.lng);
+    map.fitBounds(
+      [[Math.min(...lats)-0.008,Math.min(...lngs)-0.008],
+       [Math.max(...lats)+0.008,Math.max(...lngs)+0.008]],
+      {{padding:[40,40],maxZoom:15,animate:true,duration:0.8}}
+    );
+    setTimeout(openSR,900);
+  }}
 }}
 
-// ── LAYER CONTROL ─────────────────────────────
-L.control.layers(null, {{
-  'Accident Zones': zoneLayer,
-  'Driver Paths'  : pathLayer,
-}}, {{collapsed:false}}).addTo(map);
+// ── LAYER CONTROL — 5 base maps + overlays ────
+L.control.layers(
+  {{'🌑 Dark':BL.dark,'☀️ Light':BL.light,'🗺️ Street':BL.street,'🛰️ Satellite':BL.satellite,'🏔️ Topo':BL.topo}},
+  {{'🚨 Accident Zones':zoneLayer,'🛣️ Driver Paths':pathLayer}},
+  {{collapsed:false,position:'topright'}}
+).addTo(map);
+map.on('baselayerchange',e=>{{
+  const k={{'🌑 Dark':'dark','☀️ Light':'light','🗺️ Street':'street','🛰️ Satellite':'satellite','🏔️ Topo':'topo'}}[e.name];
+  if(k)localStorage.setItem('riskmap_bl',k);
+}});
 
-// ── LEGEND ───────────────────────────────────
-const legend = L.control({{position:'bottomright'}});
-legend.onAdd = () => {{
-  const d = L.DomUtil.create('div','legend');
-  d.innerHTML = `<h4>🗺 Legend</h4>
+// ── LEGEND ────────────────────────────────────
+const legend=L.control({{position:'bottomright'}});
+legend.onAdd=()=>{{
+  const d=L.DomUtil.create('div','legend');
+  d.innerHTML=`<h4>🗺 Legend</h4>
     <span class="dot" style="background:#d50000"></span>High Risk<br>
     <span class="dot" style="background:#ff6d00"></span>Medium Risk<br>
     <span class="dot" style="background:#ffd600"></span>Low Risk<br>
@@ -374,129 +464,100 @@ legend.addTo(map);
 // ── MOVING CAR SIMULATION ─────────────────────
 if (SHOW_CAR && PATHS.length > 0) {{
 
-  // Count total points across all paths to compute per-step delay for ~30s total
-  const totalPts = PATHS.reduce((s,p) => s + (p.coords ? p.coords.length : 0), 0);
-  const TARGET_MS = 30000; // 30 seconds total journey
-  const BASE_DELAY = totalPts > 0 ? Math.max(50, Math.floor(TARGET_MS / totalPts)) : 200;
-
-  // Single clean car icon — no background div, just emoji with glow
-  function makeCarIcon() {{
+  var makeCarIcon = function() {{
     return L.divIcon({{
-      className: 'car-icon',   // must be non-empty string to avoid Leaflet adding extra class
-      html: `<span style="font-size:22px;line-height:1;display:block;
-                          filter:drop-shadow(0 0 6px #1e90ff);">🚗</span>`,
-      iconSize: [24, 24],
-      iconAnchor: [12, 12],
-      popupAnchor: [0, -14]
+      className:'car-icon',
+      html:'<span style="font-size:22px;line-height:1;display:block;filter:drop-shadow(0 0 6px #1e90ff);">🚗</span>',
+      iconSize:[24,24], iconAnchor:[12,12], popupAnchor:[0,-14]
     }});
+  }};
+
+  // Build 5m-interpolated path for smooth movement + precise zone detection
+  var allC = [];
+  PATHS.forEach(function(p) {{ if(p.coords) allC = allC.concat(p.coords); }});
+  var ic = [];
+  for (var i = 0; i < allC.length-1; i++) {{
+    var la1=allC[i][0], ln1=allC[i][1], la2=allC[i+1][0], ln2=allC[i+1][1];
+    var R=6371000, dL=(la2-la1)*Math.PI/180, dl=(ln2-ln1)*Math.PI/180;
+    var a=Math.sin(dL/2)*Math.sin(dL/2)+Math.cos(la1*Math.PI/180)*Math.cos(la2*Math.PI/180)*Math.sin(dl/2)*Math.sin(dl/2);
+    var seg=R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+    var n=Math.max(1,Math.round(seg/5));
+    for (var s=0; s<n; s++) {{ var t=s/n; ic.push([la1+(la2-la1)*t, ln1+(ln2-ln1)*t]); }}
   }}
+  ic.push(allC[allC.length-1]);
 
-  // Car marker — placed at start, NO trail yet
-  const carMarker = L.marker(PATHS[0].coords[0], {{
-    icon: makeCarIcon(),
-    zIndexOffset: 1000
-  }}).addTo(map);
+  var savedIdx = parseInt(localStorage.getItem(LS_IDX)||'0', 10);
+  var startIdx = (savedIdx > 0 && savedIdx < ic.length) ? savedIdx : 0;
 
-  // Trail line — empty at start, grows as car moves
-  const trailPts  = [];
-  const trailLine = L.polyline([], {{color:'#1e90ff', weight:3, opacity:0.7}}).addTo(map);
+  var trailPts = [];
+  try {{ var _s=JSON.parse(localStorage.getItem(LS_TRAIL)||'[]'); if(Array.isArray(_s)) trailPts=_s; }} catch(e) {{}}
 
-  // Per-zone alert state
-  const zoneState = {{}};
+  var car   = L.marker(ic[startIdx], {{icon:makeCarIcon(), zIndexOffset:1000}}).addTo(map);
+  var trail = L.polyline(trailPts, {{color:'#1e90ff', weight:3, opacity:0.7}}).addTo(map);
+  var zSt   = {{}};
 
   function checkZones(lat, lng) {{
-    ZONES.forEach(z => {{
-      const dist      = haversineM(lat, lng, z.lat, z.lng);
-      const prev      = zoneState[z.id] || null;
-      const riskLevel = z.risk ? z.risk.toUpperCase() : 'RISK';
-
-      if (dist <= ENTER_R) {{
-        if (prev !== 'entered') {{
-          zoneState[z.id] = 'entered';
-          addAlert(
-            `🚨 Entered ${{riskLevel}} Risk Zone: ${{z.area}}`,
-            `🚨 <b>Entered ${{riskLevel}} Risk Zone</b> — ${{z.area}} | ${{z.loc}} | Severity ${{z.si.toFixed(1)}}`,
-            'entered'
-          );
+    ZONES.forEach(function(z) {{
+      var dist=haversineM(lat,lng,z.lat,z.lng), prev=zSt[z.id]||null, rl=(z.risk||'RISK').toUpperCase();
+      if (dist<=ENTER_R) {{
+        if (prev!=='entered') {{
+          zSt[z.id]='entered';
+          addAlert('🚨 Entered '+rl+' Zone: '+z.area,
+            '🚨 <b>ENTERED '+rl+' RISK ZONE</b> — '+z.area+' | '+z.loc+' | Severity '+z.si.toFixed(1),'entered');
         }}
-      }} else if (dist <= APPROACH_R) {{
-        if (prev === 'entered') {{
-          zoneState[z.id] = null;
-          addAlert(
-            `✅ Left ${{riskLevel}} Risk Zone — Safe: ${{z.area}}`,
-            `✅ <b>Left ${{riskLevel}} Risk Zone — Safe</b> &nbsp;›&nbsp; ${{z.area}}`,
-            'left'
-          );
-        }} else if (prev !== 'approaching') {{
-          zoneState[z.id] = 'approaching';
-          addAlert(
-            `⚠️ Approaching ${{riskLevel}} Risk Zone: ${{z.area}} (${{Math.round(dist)}}m)`,
-            `⚠️ <b>Approaching ${{riskLevel}} Risk Zone</b> — ${{z.area}} | ${{z.loc}} | ${{Math.round(dist)}}m ahead`,
-            'approaching'
-          );
+      }} else if (dist<=APPROACH_R) {{
+        if (prev==='entered') {{
+          zSt[z.id]='approaching';
+          addAlert('✅ Left '+rl+' Zone — Safe: '+z.area,'✅ <b>Left '+rl+' Risk Zone — Safe</b> &nbsp;›&nbsp; '+z.area,'left');
+        }} else if (prev===null) {{
+          zSt[z.id]='approaching';
+          addAlert('⚠️ Approaching '+rl+' Zone: '+z.area+' ('+Math.round(dist)+'m)',
+            '⚠️ <b>APPROACHING '+rl+' RISK ZONE</b> — '+z.area+' | '+Math.round(dist)+'m ahead','approaching');
         }}
       }} else {{
-        if (prev === 'entered') {{
-          zoneState[z.id] = null;
-          addAlert(
-            `✅ Left ${{riskLevel}} Risk Zone — Safe: ${{z.area}}`,
-            `✅ <b>Left ${{riskLevel}} Risk Zone — Safe</b> &nbsp;›&nbsp; ${{z.area}}`,
-            'left'
-          );
-        }} else if (prev === 'approaching') {{
-          zoneState[z.id] = null;
-        }}
+        if (prev==='entered') {{ zSt[z.id]=null; addAlert('✅ Left '+rl+' Zone — Safe: '+z.area,'✅ <b>Left '+rl+' Risk Zone — Safe</b> &nbsp;›&nbsp; '+z.area,'left'); }}
+        else if (prev==='approaching') {{ zSt[z.id]=null; }}
       }}
     }});
   }}
 
-  let pathIdx = 0, ptIdx = 0;
-
+  var idx = startIdx;
   function step() {{
-    if (pathIdx >= PATHS.length) {{
-      // Simulation done
-      carMarker.setIcon(L.divIcon({{
-        className: 'car-icon',
-        html: `<span style="font-size:22px;line-height:1;display:block;">🏁</span>`,
-        iconSize:[24,24], iconAnchor:[12,12]
-      }}));
-      addAlert('🏁 Destination reached!', '🏁 <b>Simulation complete — Destination reached safely!</b>', 'safe');
+    if (idx >= ic.length) {{
+      car.setIcon(L.divIcon({{className:'car-icon',html:'<span style="font-size:22px;line-height:1;display:block;">🏁</span>',iconSize:[24,24],iconAnchor:[12,12]}}));
+      addAlert('🏁 Done!','🏁 <b>Simulation complete — Destination reached!</b>','safe');
+      localStorage.removeItem(LS_IDX); localStorage.removeItem(LS_TRAIL);
       return;
     }}
-
-    const coords = PATHS[pathIdx].coords;
-    if (ptIdx >= coords.length) {{
-      pathIdx++;
-      ptIdx = 0;
-      if (pathIdx < PATHS.length)
-        addAlert(`🟢 Path #${{PATHS[pathIdx].id}}`, `🟢 <b>Continuing to Path #${{PATHS[pathIdx].id}}</b>`, 'safe');
-      setTimeout(step, BASE_DELAY);
-      return;
+    var lat=ic[idx][0], lng=ic[idx][1];
+    car.setLatLng([lat,lng]);
+    trailPts.push([lat,lng]); trail.setLatLngs(trailPts);
+    if (idx%10===0) {{
+      localStorage.setItem(LS_IDX, idx);
+      localStorage.setItem(LS_TRAIL, JSON.stringify(trailPts.slice(-200)));
     }}
-
-    const [lat, lng] = coords[ptIdx];
-
-    // Move car
-    carMarker.setLatLng([lat, lng]);
-
-    // Grow trail — only from this point onward
-    trailPts.push([lat, lng]);
-    trailLine.setLatLngs(trailPts);
-
-    // Pan map gently to follow car
-    if (!map.getBounds().contains([lat, lng]))
-      map.panTo([lat, lng], {{animate:true, duration:0.5, easeLinearity:0.5}});
-
-    checkZones(lat, lng);
-    ptIdx++;
-    setTimeout(step, BASE_DELAY);
+    if (!map.getBounds().contains([lat,lng]))
+      map.panTo([lat,lng], {{animate:true,duration:0.4,easeLinearity:0.5}});
+    checkZones(lat,lng);
+    idx++;
+    setTimeout(step, 80);
   }}
 
-  // Zoom to start of path before beginning
-  map.setView(PATHS[0].coords[0], 14);
-  addAlert(`🟢 Simulation started`, `🟢 <b>Simulation started — Path #${{PATHS[0].id}} | ${{totalPts}} steps | ~30s journey</b>`, 'safe');
-  setTimeout(step, 500); // small delay so map settles before car moves
+  if (startIdx===0) {{
+    map.setView(ic[0], 14);
+    addAlert('🟢 Started','🟢 <b>Simulation started — '+ic.length+' steps</b>','safe');
+    setTimeout(step, 500);
+  }} else {{
+    map.setView(ic[startIdx], 14);
+    addAlert('🟢 Resumed','🟢 <b>Resumed from step '+startIdx+' / '+ic.length+'</b>','safe');
+    setTimeout(step, 100);
+  }}
+
+}} else if (!SHOW_CAR) {{
+  localStorage.removeItem(LS_IDX);
+  localStorage.removeItem(LS_TRAIL);
 }}
+
 </script>
 </body>
 </html>"""
@@ -513,46 +574,46 @@ def alert_box(level: str, text: str):
 
 
 # ─────────────────────────────────────────────
-# 8. MAIN APPLICATION LOGIC
+# 8. MAIN
 # ─────────────────────────────────────────────
 def main():
-    # ── Session state init — must be FIRST, before any widget ──
-    if "running" not in st.session_state:
-        st.session_state.running = False
+    defaults = dict(running=False, highlight_point=None, highlight_label="",
+                    search_query="", search_zones=None, risk_info=None, search_error="")
+    for k,v in defaults.items():
+        if k not in st.session_state: st.session_state[k]=v
 
-    # ── Sidebar — widgets only, NO rerun inside ──
     with st.sidebar:
         st.image("https://img.icons8.com/color/96/traffic-jam.png", width=56)
         st.title("Road Risk Navigator")
         st.caption("Powered by Supabase + Leaflet")
         st.divider()
 
-        st.subheader("\U0001f3ae Session Controls")
-        col1, col2 = st.columns(2)
-        with col1:
-            start_btn = st.button("\u25b6 Start", use_container_width=True, type="primary")
-        with col2:
-            stop_btn  = st.button("\u23f9 Stop",  use_container_width=True)
-
+        st.subheader("🎮 Session Controls")
+        c1,c2 = st.columns(2)
+        with c1: start_btn = st.button("▶ Start", use_container_width=True, type="primary")
+        with c2: stop_btn  = st.button("⏹ Stop",  use_container_width=True)
         if st.session_state.running:
-            st.success("\U0001f7e2 Car simulation active on map.")
+            st.success("🟢 Car simulation active.")
         else:
-            st.info("\u23f8 Press Start to begin.")
-
+            st.info("⏸ Press Start to begin.")
         st.divider()
 
-        st.subheader("\U0001f4cd Location Search")
-        address_input = st.text_input("Search address / place", placeholder="e.g. Andheri, Mumbai")
-        search_btn    = st.button("\U0001f50d Find & Check Risk", use_container_width=True)
-
+        st.subheader("📍 Location Search")
+        address_input = st.text_input("Search location",
+            placeholder="e.g. Deonar | Andheri, Mumbai | 19.076, 72.877")
+        search_btn = st.button("🔍 Find & Check Risk", use_container_width=True)
+        if st.session_state.highlight_point:
+            if st.button("✖ Clear Search", use_container_width=True):
+                for k in ["highlight_point","search_zones","risk_info","highlight_label","search_query","search_error"]:
+                    st.session_state[k] = None if k in ["highlight_point","search_zones","risk_info"] else ""
         st.divider()
 
-        st.subheader("\U0001f527 Filters & Settings")
-        risk_filter = st.multiselect("Risk Level", ["High", "Medium", "Low"], default=["High", "Medium", "Low"])
+        st.subheader("🔧 Filters & Settings")
+        risk_filter = st.multiselect("Risk Level", ["High","Medium","Low"], default=["High","Medium","Low"])
         show_paths  = st.checkbox("Show Driver Paths", value=True)
         show_zones  = st.checkbox("Show Accident Zones", value=True)
 
-    # ── Button logic OUTSIDE sidebar — st.rerun() is reliable here ──
+    # Start/Stop — only these change show_car
     if start_btn:
         st.session_state.running = True
         st.rerun()
@@ -560,79 +621,110 @@ def main():
         st.session_state.running = False
         st.rerun()
 
-    # ── Load Data ────────────────────────────
     accident_df  = load_accident_data()
     driver_paths = load_driver_path()
+
+    # SEARCH — stores in session_state, car resumes via localStorage on rebuild
+    if search_btn and address_input:
+        result = resolve_location(address_input.strip(), accident_df)
+        if result:
+            lat, lon, label = result
+            st.session_state.highlight_point = (lat, lon)
+            st.session_state.highlight_label = label
+            st.session_state.search_query    = address_input.strip()
+            ql = address_input.strip().lower()
+            matched = [
+                {"id":int(r["id"]),"lat":float(r["latitude"]),"lng":float(r["longitude"]),
+                 "area":str(r.get("area","")),"loc":str(r.get("location","")),
+                 "location":str(r.get("location","")),"city":str(r.get("city","")),
+                 "si":float(r.get("severity_index",0)),"severity_index":float(r.get("severity_index",0)),
+                 "risk":str(r.get("risk_level","Low")),"risk_level":str(r.get("risk_level","Low")),
+                 "ta":int(r.get("total_accident",0)),"total_accident":int(r.get("total_accident",0)),
+                 "tf":int(r.get("total_fatality",0)),"total_fatality":int(r.get("total_fatality",0))}
+                for _,r in accident_df.iterrows()
+                if ql == str(r.get("area","")).lower().strip()
+            ]
+            st.session_state.search_zones = matched if matched else None
+            st.session_state.risk_info = {
+                "level": "HIGH" if any(z["risk"].lower()=="high" for z in matched) else
+                         "MEDIUM" if any(z["risk"].lower()=="medium" for z in matched) else "LOW",
+                "zones": matched,
+                "message": f"{len(matched)} exact zone(s) found for '{address_input.strip()}'"
+            } if matched else None
+            st.session_state.search_error = ""
+        else:
+            st.session_state.highlight_point = None
+            st.session_state.search_zones    = None
+            st.session_state.risk_info       = None
+            st.session_state.search_error    = f"Location not found for '{address_input}'."
 
     filtered_df   = accident_df[accident_df["risk_level"].isin(risk_filter)] if risk_filter else accident_df
     display_df    = filtered_df if show_zones else accident_df.iloc[0:0]
     display_paths = driver_paths if show_paths else []
 
-    # ── Header KPIs ──────────────────────────
     st.title("🚦 Road Accident Risk Dashboard")
-    k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("Total Hotspots",   len(accident_df))
-    k2.metric("High Risk Zones",  int((accident_df["risk_level"] == "High").sum()))
-    k3.metric("Total Accidents",  int(accident_df["total_accident"].sum()))
-    k4.metric("Total Fatalities", int(accident_df["total_fatality"].sum()))
-    k5.metric("Driver Paths",     len(driver_paths))
+    k1,k2,k3,k4,k5 = st.columns(5)
+    k1.metric("Total Hotspots",  len(accident_df))
+    k2.metric("High Risk Zones", int((accident_df["risk_level"]=="High").sum()))
+    k3.metric("Total Accidents", int(accident_df["total_accident"].sum()))
+    k4.metric("Total Fatalities",int(accident_df["total_fatality"].sum()))
+    k5.metric("Driver Paths",    len(driver_paths))
     st.divider()
 
-    # ── Geocode + Risk Check ──────────────────
-    highlight_point = None
-    if search_btn and address_input:
-        coords = geocode_location(address_input)
-        if coords:
-            highlight_point = coords
-            risk_info = check_risk_at_point(coords[0], coords[1], accident_df, 500)
-            st.subheader("📊 Risk Assessment")
-            alert_box(risk_info["level"], risk_info["message"])
-            if risk_info["zones"]:
-                near_df = pd.DataFrame(risk_info["zones"])[
-                    ["area","location","risk_level","severity_index",
-                     "total_accident","total_fatality","distance_m"]
-                ].sort_values("distance_m")
-                st.dataframe(near_df, use_container_width=True, hide_index=True)
-        else:
-            st.error("Location not found. Try a more specific address.")
+    if st.session_state.search_error:
+        st.error(st.session_state.search_error)
 
-    # ── Map ───────────────────────────────────
+    if st.session_state.highlight_point and st.session_state.search_zones:
+        ri = st.session_state.risk_info
+        matched_zones = st.session_state.search_zones
+        st.subheader("📊 Risk Assessment")
+        st.caption(f"**{st.session_state.highlight_label}**")
+        if ri:
+            alert_box(ri["level"], ri["message"])
+        # Build display df safely using .get() — works regardless of which key names exist
+        near_df = pd.DataFrame([{
+            "Area":           z.get("area", ""),
+            "Location":       z.get("location", z.get("loc", "")),
+            "Risk Level":     z.get("risk_level", z.get("risk", "")),
+            "Severity Index": z.get("severity_index", z.get("si", 0)),
+            "Accidents":      z.get("total_accident", z.get("ta", 0)),
+            "Fatalities":     z.get("total_fatality", z.get("tf", 0)),
+        } for z in matched_zones]).sort_values("Severity Index", ascending=False)
+        st.dataframe(near_df, use_container_width=True, hide_index=True)
+
     st.subheader("🗺️ Interactive Risk Map  •  🚗 Live Car Simulation")
-    st.caption("The 🚗 car moves along the driver path. The alert feed at the bottom of the map shows real-time zone alerts.")
+    st.caption("Car moves along the driver path. Alert bar at bottom shows real-time zone alerts.")
 
     center_lat = float(display_df["latitude"].mean())  if not display_df.empty else 19.076
     center_lng = float(display_df["longitude"].mean()) if not display_df.empty else 72.877
 
     map_html = build_leaflet_map(
-        accident_df     = display_df,
-        driver_paths    = display_paths,
-        center_lat      = center_lat,
-        center_lng      = center_lng,
-        highlight_point = highlight_point,
-        show_car        = st.session_state.running,
+        accident_df  = display_df,
+        driver_paths = display_paths,
+        center_lat   = center_lat,
+        center_lng   = center_lng,
+        search_zones = st.session_state.search_zones,
+        search_label = st.session_state.highlight_label,
+        show_car     = st.session_state.running,
     )
     components.html(map_html, height=700, scrolling=False)
 
-    # ── Data Tables ───────────────────────────
     with st.expander("📋 Accident Zone Data Table", expanded=False):
         st.dataframe(
             filtered_df[["id","city","area","location","risk_level",
-                          "severity_index","total_accident","total_fatality",
-                          "latitude","longitude"]].sort_values("severity_index", ascending=False),
+                         "severity_index","total_accident","total_fatality",
+                         "latitude","longitude"]].sort_values("severity_index",ascending=False),
             use_container_width=True, hide_index=True
         )
 
-
-    # ── Footer ────────────────────────────────
     st.markdown("""
 <div class="footer-bar">
     🚦 <strong>Road Risk Navigator</strong> &nbsp;|&nbsp;
     Data: Supabase PostgreSQL &nbsp;|&nbsp;
-    Map: Leaflet.js + CartoDB Dark &nbsp;|&nbsp;
+    Map: Leaflet.js &nbsp;|&nbsp;
     Geocoding: Nominatim (OpenStreetMap) &nbsp;|&nbsp;
-    <em>For road safety awareness only — not a substitute for official traffic guidance.</em>
-</div>
-""", unsafe_allow_html=True)
+    <em>For road safety awareness only.</em>
+</div>""", unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
